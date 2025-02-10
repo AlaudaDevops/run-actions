@@ -1,0 +1,39 @@
+on:
+  workflow_call:
+    inputs:
+      repo:
+        required: true
+        description: 'The repository run'
+        type: string
+      revision:
+        required: true
+        description: 'The revision run'
+        type: string
+      script:
+        required: true
+        description: 'The script to run'
+        type: string
+
+jobs:
+  run-integration-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4 # https://github.com/marketplace/actions/checkout
+        with:
+          repository: ${{ inputs.repo }}
+          ref: ${{ inputs.revision }}
+          token: ${{ secrets.TOKEN }}
+      - uses: azure/setup-kubectl@v4 # setup kubectl 
+      - uses: jerop/tkn@v0.1.0 # setup tkn cli
+      - name: Create k8s Kind Cluster
+        uses: helm/kind-action@v1
+        with:
+          registry: true
+          registry_name: my-registry
+          registry_port: 5001
+          registry_enable_delete: true
+      
+      - name: run integration test
+        run: |
+          set -ex
+          ${{ inputs.script }}
