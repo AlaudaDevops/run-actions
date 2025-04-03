@@ -1,7 +1,7 @@
 name: setup-org-rules
 on:
   schedule:
-    - cron: '0 0 * * *'
+    - cron: '0 6 * * *'
 
   workflow_dispatch:
     inputs:
@@ -18,7 +18,8 @@ on:
       script:
         required: true
         description: 'The script to run'
-        type: ./scripts/setup-repos.sh
+        type: string
+        default: "./scripts/setup-repos.sh"
 jobs:
   setup-org-rules:
     runs-on: ubuntu-latest
