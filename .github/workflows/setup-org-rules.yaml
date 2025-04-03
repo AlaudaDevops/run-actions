@@ -1,0 +1,41 @@
+name: setup-org-rules
+on:
+  schedule:
+    - cron: '0 0 * * *'
+
+  workflow_dispatch:
+    inputs:
+      repo:
+        required: true
+        description: 'The repository run'
+        type: string
+        default: alaudadevops/hack
+      revision:
+        required: true
+        description: 'The revision run'
+        type: string
+        default: main
+      script:
+        required: true
+        description: 'The script to run'
+        type: ./scripts/setup-repos.sh
+jobs:
+  setup-org-rules:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4 # https://github.com/marketplace/actions/checkout
+        with:
+          repository: ${{ inputs.repo }}
+          ref: ${{ inputs.revision }}
+          token: ${{ secrets.TOKEN }}
+      - name: Install GH CLI
+        uses: dev-hanz-ops/install-gh-cli-action@v0.2.1
+      - name: Run script
+        run: |
+          set -ex
+
+          echo "==> 🚀 Will start to run script!!"
+
+          ${{ inputs.script }}
+
+          echo "==> 🎉 done!"
