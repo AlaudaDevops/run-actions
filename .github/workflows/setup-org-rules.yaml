@@ -1,7 +1,7 @@
 name: setup-org-rules
 on:
   schedule:
-    - cron: '5 6 * * *'
+    - cron: '15 6 * * *'
 
   workflow_dispatch:
     inputs:
@@ -19,8 +19,8 @@ on:
         required: true
         description: 'The script to run'
         type: string
-        default: |+
-          gh auth login --with-token < secret.token
+        default: |
+          gh auth login --with-token < secret.token &&
           ./scripts/setup-repos.sh alaudadevops
 jobs:
   setup-org-rules:
