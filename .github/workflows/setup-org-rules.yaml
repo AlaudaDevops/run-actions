@@ -19,8 +19,8 @@ on:
         required: true
         description: 'The script to run'
         type: string
-        default: |
-          gh auth login --with-token < ${{ secrets.TOKEN }}
+        default: |+
+          gh auth login --with-token < secret.token
           ./scripts/setup-repos.sh alaudadevops
 jobs:
   setup-org-rules:
@@ -35,6 +35,8 @@ jobs:
         uses: dev-hanz-ops/install-gh-cli-action@v0.2.1
       - name: Run script
         run: |
+          echo -n "${{ secrets.TOKEN }}" > secret.token
+
           set -ex
 
           echo "==> 🚀 Will start to run script!!"
