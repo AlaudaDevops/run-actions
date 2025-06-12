@@ -1,0 +1,61 @@
+name: dependabot
+on:
+  schedule:
+    # all input default values should be added into the workflow directly
+    # https://stackoverflow.com/questions/72539900/schedule-trigger-github-action-workflow-with-input-parameters
+    - cron: '0 7 * * 1'
+  workflow_dispatch:
+    inputs:
+      repo:
+        required: true
+        description: 'The repository run'
+        type: string
+        default: alaudadevops/hack
+      revision:
+        required: true
+        description: 'The revision run'
+        type: string
+        default: main
+      script:
+        required: true
+        description: 'The script to run'
+        type: string
+        default: |
+          python run-bot.py
+jobs:
+  setup-org-rules:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4 # https://github.com/marketplace/actions/checkout
+        with:
+          repository: ${{ inputs.repo || 'alaudadevops/hack' }}
+          ref: ${{ inputs.revision || 'main' }}
+          token: ${{ secrets.TOKEN }}
+      - name: Install Go
+        uses: actions/setup-go@v5
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Run script
+        run: |
+          git config --global user.name dependabot
+          git config --global user.email dependabot@alaudadevops.io
+          git config --global credential.helper store
+          echo "https://bot:${{ secrets.TOKEN }}@github.com" > ~/.git-credentials
+          export DEPENDABOT_GIT_TOKEN=${{ secrets.TOKEN }}
+
+          set -ex
+          echo "==> install Trivy cli ..."
+          curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sh -s -- -b /usr/local/bin
+          trivy version
+          trivy rootfs --download-db-only
+
+          echo "==> install dependabot cli ..."
+          go install github.com/AlaudaDevops/toolbox/dependabot@main
+
+          echo "==> 🚀 Will start to run script!!"
+
+          cd dependabot
+          pip install -r requirements.txt
+          ${{ inputs.script || 'python run-bot.py' }}
+          echo "==> 🎉 done!"
