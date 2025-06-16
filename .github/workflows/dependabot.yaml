@@ -1,5 +1,9 @@
 name: dependabot
 on:
+  push:
+    branches:
+      - main         # 只在 push 到 main 分支时触发
+      - 'test/*'
   schedule:
     # all input default values should be added into the workflow directly
     # https://stackoverflow.com/questions/72539900/schedule-trigger-github-action-workflow-with-input-parameters
