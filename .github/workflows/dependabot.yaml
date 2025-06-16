@@ -1,5 +1,9 @@
 name: dependabot
 on:
+  pull_request:
+    branches:
+      - main
+      - 'release/*'
   push:
     branches:
       - main         # 只在 push 到 main 分支时触发
