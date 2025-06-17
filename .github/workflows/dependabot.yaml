@@ -43,6 +43,7 @@ jobs:
           git config --global credential.helper store
           echo "https://bot:${{ secrets.TOKEN }}@github.com" > ~/.git-credentials
           export DEPENDABOT_GIT_TOKEN=${{ secrets.TOKEN }}
+          export WECOM_WEBHOOK_TOKEN=${{ secrets.WECOM_TOKEN }}
 
           set -ex
           echo "==> install Trivy cli ..."
@@ -56,6 +57,8 @@ jobs:
           echo "==> 🚀 Will start to run script!!"
 
           cd dependabot
+          # render bot.yaml with env vars
+          envsubst < bot.yaml > temp_bot.yaml; mv temp_bot.yaml bot.yaml;
           pip install -r requirements.txt
           ${{ inputs.script || 'python run-bot.py' }}
           echo "==> 🎉 done!"
