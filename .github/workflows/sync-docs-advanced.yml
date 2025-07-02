@@ -1,28 +1,27 @@
 name: Sync Documentation
 
-env:
-  SYNCED_PATHS: docs/,.yarn/,doom.config.yml,yarn.lock,tsconfig.json,package.json,sites.yaml
-
 on:
-  push:
-    branches:
-      - main
-      - release-*
-    paths:
-      - 'docs/**'
-      - '.yarn/**'
-      - "doom.config.yml"
-      - "yarn.lock"
-      - "tsconfig.json"
-      - "package.json"
-      - "sites.yaml"
   workflow_dispatch:  # Allow manual triggering
     inputs:
+      # forces sync even if no changes detected
       force_sync:
         description: 'Force sync even if no changes detected'
         required: false
         default: 'false'
         type: boolean
+      # source repository to be synced from, org/repo format
+      source_repo:
+        required: true
+        type: string
+      # target repository to be synced to, org/repo format
+      target_repo:
+        required: true
+        type: string
+      # paths to be synced, comma separated
+      synced_paths:
+        required: false
+        type: string
+        default: docs/,.yarn/,doom.config.yml,yarn.lock,tsconfig.json,package.json,sites.yaml
 
   workflow_call:  # Allow other workflows to reuse this workflow
     inputs:
@@ -34,6 +33,17 @@ on:
       target_repo:
         required: true
         type: string
+      # forces sync even if no changes detected
+      force_sync:
+        required: false
+        type: boolean
+        default: 'false'
+      # paths to be synced, comma separated
+      synced_paths:
+        required: false
+        type: string
+        default: docs/,.yarn/,doom.config.yml,yarn.lock,tsconfig.json,package.json,sites.yaml
+
     secrets:
       # token with access privilege to both repos
       SYNC_TOKEN:
@@ -95,7 +105,7 @@ jobs:
         # Create backup of existing target-docs content
         mkdir -p backup/
 
-        IFS=',' read -ra PATHS <<< "$SYNCED_PATHS"
+        IFS=',' read -ra PATHS <<< "${{input.synced_paths}}"
         for path in "${PATHS[@]}"; do
           if [ -d "target-docs/$path" ]; then
             cp -r "target-docs/$path" "backup/$path"
@@ -115,7 +125,7 @@ jobs:
         set -e  # Exit on any error
 
         copied_files=()
-        IFS=',' read -ra PATHS <<< "$SYNCED_PATHS"
+        IFS=',' read -ra PATHS <<< "${{input.synced_paths}}"
         for path in "${PATHS[@]}"; do
           if [ -d "source-docs/$path" ] || [ -f "source-docs/$path" ]; then
             rm -rf target-docs/$path
