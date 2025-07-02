@@ -37,7 +37,7 @@ on:
       force_sync:
         required: false
         type: boolean
-        default: 'false'
+        default: false
       # paths to be synced, comma separated
       synced_paths:
         required: false
