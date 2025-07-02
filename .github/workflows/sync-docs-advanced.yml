@@ -1,0 +1,225 @@
+name: Sync Documentation
+
+env:
+  SYNCED_PATHS: docs/,.yarn/,doom.config.yml,yarn.lock,tsconfig.json,package.json,sites.yaml
+
+on:
+  push:
+    branches:
+      - main
+      - release-*
+    paths:
+      - 'docs/**'
+      - '.yarn/**'
+      - "doom.config.yml"
+      - "yarn.lock"
+      - "tsconfig.json"
+      - "package.json"
+      - "sites.yaml"
+  workflow_dispatch:  # Allow manual triggering
+    inputs:
+      force_sync:
+        description: 'Force sync even if no changes detected'
+        required: false
+        default: 'false'
+        type: boolean
+
+  workflow_call:  # Allow other workflows to reuse this workflow
+    inputs:
+      # source repository to be synced from, org/repo format
+      source_repo:
+        required: true
+        type: string
+      # source repository to be synced to, org/repo format
+      target_repo:
+        required: true
+        type: string
+    secrets:
+      # token with access privilege to both repos
+      SYNC_TOKEN:
+        required: true
+
+jobs:
+  sync-docs:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Check if this is a reverse sync commit
+      id: check_reverse_sync
+      run: |
+        commit_msg="${{ github.event.head_commit.message }}"
+        if echo "$commit_msg" | grep -q "\[reverse-sync\]"; then
+          echo "reverse_sync=true" >> $GITHUB_OUTPUT
+          echo "🔄 This commit is from reverse sync - skipping forward sync to prevent loop"
+        else
+          echo "reverse_sync=false" >> $GITHUB_OUTPUT
+          echo "✅ This is a regular commit - proceeding with forward sync"
+        fi
+
+    - name: Checkout source repository
+      if: steps.check_reverse_sync.outputs.reverse_sync == 'false'
+      uses: actions/checkout@v4
+      with:
+        token: ${{ secrets.SYNC_TOKEN }}
+        path: source-docs
+        fetch-depth: 0  # Fetch full history for better commit messages
+        ref: ${{ github.ref }}
+
+    - name: Checkout target repository
+      if: steps.check_reverse_sync.outputs.reverse_sync == 'false'
+      uses: actions/checkout@v4
+      with:
+        repository: ${{inputs.target_repo}}
+        token: ${{ secrets.SYNC_TOKEN }}
+        path: target-docs
+        fetch-depth: 0
+
+    - name: Checkout target repo branch
+      if: steps.check_reverse_sync.outputs.reverse_sync == 'false'
+      run: |
+        cd target-docs
+        base_ref=${{ github.event.ref }}
+        # Remove refs/heads/ prefix to get just the branch name
+        base_ref=${base_ref#refs/heads/}
+        echo "base_ref=$base_ref" >> $GITHUB_OUTPUT
+        has_remote_branch=$(git branch -r --list "origin/$base_ref")
+        if [ -z "$has_remote_branch" ]; then
+          git checkout -b $base_ref
+        else
+          git checkout $base_ref
+        fi
+
+    - name: Set up sync environment
+      if: steps.check_reverse_sync.outputs.reverse_sync == 'false'
+      run: |
+        # Create backup of existing target-docs content
+        mkdir -p backup/
+
+        IFS=',' read -ra PATHS <<< "$SYNCED_PATHS"
+        for path in "${PATHS[@]}"; do
+          if [ -d "target-docs/$path" ]; then
+            cp -r "target-docs/$path" "backup/$path"
+            echo "Backup created for $path..."
+          fi
+          if [ -f "target-docs/$path" ]; then
+            cp "target-docs/$path" "backup/$path"
+            echo "Backup created for $path..."
+          fi
+        done
+
+        echo "Backup created successfully"
+
+    - name: Sync documentation files
+      if: steps.check_reverse_sync.outputs.reverse_sync == 'false'
+      run: |
+        set -e  # Exit on any error
+
+        copied_files=()
+        IFS=',' read -ra PATHS <<< "$SYNCED_PATHS"
+        for path in "${PATHS[@]}"; do
+          if [ -d "source-docs/$path" ] || [ -f "source-docs/$path" ]; then
+            rm -rf target-docs/$path
+            cp -rf source-docs/$path target-docs/
+            echo "✓ Copied $path"
+            copied_files+=("$path")
+          else
+            echo "⚠️ No $path found in source-docs"
+          fi
+        done
+
+        # Create sync metadata
+        cat > target-docs/.github/SYNC_INFO.md << EOF
+        # Documentation Sync Information
+
+        - **Last synced**: $(date -u '+%Y-%m-%d %H:%M:%S UTC')
+        - **Source repository**: ${{input.source_repo}}
+        - **Source commit**: [${{ github.sha }}](https://github.com/${{input.source_repo}}/commit/${{ github.sha }})
+        - **Triggered by**: ${{ github.actor }}
+        - **Workflow run**: [#${{ github.run_number }}](https://github.com/${{input.source_repo}}/actions/runs/${{ github.run_id }})
+
+        ## Files synced:
+        EOF
+
+        # List synced files
+        for file in "${copied_files[@]}"; do
+          echo "- $file" >> target-docs/.github/SYNC_INFO.md
+        done
+
+    - name: Configure Git
+      if: steps.check_reverse_sync.outputs.reverse_sync == 'false'
+      run: |
+        cd target-docs
+        git config user.name "${{github.event.pusher.name}}"
+        git config user.email "${{github.event.pusher.email}}"
+
+    - name: Check for changes and commit
+      if: steps.check_reverse_sync.outputs.reverse_sync == 'false'
+      id: commit
+      run: |
+        cd target-docs
+        git add .
+
+        # Check if there are changes to commit
+        if git diff --staged --quiet && [ "${{ inputs.force_sync }}" != "true" ]; then
+          echo "changes=false" >> $GITHUB_OUTPUT
+          echo "No changes detected - skipping commit"
+        else
+          echo "changes=true" >> $GITHUB_OUTPUT
+
+          # Get the commit message from the source repository
+          cd ../source-docs
+          source_commit_msg=$(git log -1 --pretty=format:"%s")
+          source_commit_author=$(git log -1 --pretty=format:"%an")
+
+          cd ../target-docs
+
+          # Create comprehensive commit message
+          cat > commit_message.txt << EOF
+        📚 Sync docs from ${{input.source_repo}} on ${{github.sha}}
+
+        Source: $source_commit_msg
+        Author: $source_commit_author
+        Ref: ${{ github.ref }}
+        Commit: ${{ github.sha }}
+
+        This commit automatically syncs documentation changes from the source-docs repository.
+
+        🔗 View source commit: https://github.com/${{input.source_repo}}/commit/${{ github.sha }}
+        🤖 Synced on $(date -u '+%Y-%m-%d %H:%M:%S UTC')
+        EOF
+
+          git commit -F commit_message.txt
+          rm commit_message.txt
+        fi
+
+    - name: Push changes
+      if: steps.commit.outputs.changes == 'true' && steps.check_reverse_sync.outputs.reverse_sync == 'false'
+      run: |
+        base_ref=${{ github.event.ref }}
+        # Remove refs/heads/ prefix to get just the branch name
+        base_ref=${base_ref#refs/heads/}
+        cd target-docs
+        git push -u origin $base_ref
+        echo "✅ Successfully pushed changes to ${{input.target_repo}} repository on ref $base_ref"
+
+    - name: Create sync summary
+      run: |
+        if [ "${{ steps.check_reverse_sync.outputs.reverse_sync }}" == "true" ]; then
+          echo "## 🔄 Reverse Sync Detected - Forward Sync Skipped" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "This commit was created by the reverse sync process from ${{ inputs.target_repo }}." >> $GITHUB_STEP_SUMMARY
+          echo "Forward sync has been skipped to prevent an infinite sync loop." >> $GITHUB_STEP_SUMMARY
+        elif [ "${{ steps.commit.outputs.changes }}" == "true" ]; then
+          echo "## 🎉 Sync Completed Successfully" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Documentation has been successfully synced from ${{input.source_repo}} to ${{inputs.target_repo}}." >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Details:" >> $GITHUB_STEP_SUMMARY
+          echo "- **Source commit**: [${{ github.sha }}](https://github.com/${{input.source_repo}}/commit/${{ github.sha }})" >> $GITHUB_STEP_SUMMARY
+          echo "- **Target repository**: [${{inputs.target_repo}}](https://github.com/${{inputs.target_repo}})" >> $GITHUB_STEP_SUMMARY
+          echo "- **Sync time**: $(date -u '+%Y-%m-%d %H:%M:%S UTC')" >> $GITHUB_STEP_SUMMARY
+        else
+          echo "## ℹ️ No Changes to Sync" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "No changes were detected in the documentation files." >> $GITHUB_STEP_SUMMARY
+        fi
