@@ -105,7 +105,7 @@ jobs:
         # Create backup of existing target-docs content
         mkdir -p backup/
 
-        IFS=',' read -ra PATHS <<< "${{input.synced_paths}}"
+        IFS=',' read -ra PATHS <<< "${{inputs.synced_paths}}"
         for path in "${PATHS[@]}"; do
           if [ -d "target-docs/$path" ]; then
             cp -r "target-docs/$path" "backup/$path"
@@ -125,7 +125,7 @@ jobs:
         set -e  # Exit on any error
 
         copied_files=()
-        IFS=',' read -ra PATHS <<< "${{input.synced_paths}}"
+        IFS=',' read -ra PATHS <<< "${{inputs.synced_paths}}"
         for path in "${PATHS[@]}"; do
           if [ -d "source-docs/$path" ] || [ -f "source-docs/$path" ]; then
             rm -rf target-docs/$path
@@ -142,10 +142,10 @@ jobs:
         # Documentation Sync Information
 
         - **Last synced**: $(date -u '+%Y-%m-%d %H:%M:%S UTC')
-        - **Source repository**: ${{input.source_repo}}
-        - **Source commit**: [${{ github.sha }}](https://github.com/${{input.source_repo}}/commit/${{ github.sha }})
+        - **Source repository**: ${{inputs.source_repo}}
+        - **Source commit**: [${{ github.sha }}](https://github.com/${{inputs.source_repo}}/commit/${{ github.sha }})
         - **Triggered by**: ${{ github.actor }}
-        - **Workflow run**: [#${{ github.run_number }}](https://github.com/${{input.source_repo}}/actions/runs/${{ github.run_id }})
+        - **Workflow run**: [#${{ github.run_number }}](https://github.com/${{inputs.source_repo}}/actions/runs/${{ github.run_id }})
 
         ## Files synced:
         EOF
@@ -185,7 +185,7 @@ jobs:
 
           # Create comprehensive commit message
           cat > commit_message.txt << EOF
-        📚 Sync docs from ${{input.source_repo}} on ${{github.sha}}
+        📚 Sync docs from ${{inputs.source_repo}} on ${{github.sha}}
 
         Source: $source_commit_msg
         Author: $source_commit_author
@@ -194,7 +194,7 @@ jobs:
 
         This commit automatically syncs documentation changes from the source-docs repository.
 
-        🔗 View source commit: https://github.com/${{input.source_repo}}/commit/${{ github.sha }}
+        🔗 View source commit: https://github.com/${{inputs.source_repo}}/commit/${{ github.sha }}
         🤖 Synced on $(date -u '+%Y-%m-%d %H:%M:%S UTC')
         EOF
 
@@ -210,7 +210,7 @@ jobs:
         base_ref=${base_ref#refs/heads/}
         cd target-docs
         git push -u origin $base_ref
-        echo "✅ Successfully pushed changes to ${{input.target_repo}} repository on ref $base_ref"
+        echo "✅ Successfully pushed changes to ${{inputs.target_repo}} repository on ref $base_ref"
 
     - name: Create sync summary
       run: |
@@ -222,10 +222,10 @@ jobs:
         elif [ "${{ steps.commit.outputs.changes }}" == "true" ]; then
           echo "## 🎉 Sync Completed Successfully" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "Documentation has been successfully synced from ${{input.source_repo}} to ${{inputs.target_repo}}." >> $GITHUB_STEP_SUMMARY
+          echo "Documentation has been successfully synced from ${{inputs.source_repo}} to ${{inputs.target_repo}}." >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "### Details:" >> $GITHUB_STEP_SUMMARY
-          echo "- **Source commit**: [${{ github.sha }}](https://github.com/${{input.source_repo}}/commit/${{ github.sha }})" >> $GITHUB_STEP_SUMMARY
+          echo "- **Source commit**: [${{ github.sha }}](https://github.com/${{inputs.source_repo}}/commit/${{ github.sha }})" >> $GITHUB_STEP_SUMMARY
           echo "- **Target repository**: [${{inputs.target_repo}}](https://github.com/${{inputs.target_repo}})" >> $GITHUB_STEP_SUMMARY
           echo "- **Sync time**: $(date -u '+%Y-%m-%d %H:%M:%S UTC')" >> $GITHUB_STEP_SUMMARY
         else
