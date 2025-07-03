@@ -182,31 +182,20 @@ jobs:
               prTitle = `${{ inputs.pr_title_prefix }} ${commitCount} commits to ${{ matrix.branch }}`;
             }
 
-            const prBody = `
-            ## Cherry-pick Summary
+            const prBody =
+            `## Cherry-pick Summary
 
             This PR cherry-picks ${commitCount} commit${commitCount > 1 ? 's' : ''} to branch \`${{ matrix.branch }}\`.
 
             **Target branch:** ${{ matrix.branch }}
             **Commits cherry-picked:** ${commitCount}
+            **Commits:** ${commits.join(', ')}
 
-            ## Commits Included
+             ---
 
-            ${{ steps.commit-details.outputs.commit_details }}
+            *This PR was automatically created by the cherry-pick workflow.*`;
 
-            ## Primary Commit Details
-
-            **Original author:** ${{ steps.commit-details.outputs.commit_author }}
-
-            **Original commit message:**
-            \`\`\`
-            ${{ steps.commit-details.outputs.commit_message }}
-            \`\`\`
-
-            ---
-
-            *This PR was automatically created by the cherry-pick workflow.*
-            `;
+            console.log(prBody);
 
             try {
               const response = await github.rest.pulls.create({
@@ -219,16 +208,6 @@ jobs:
               });
 
               console.log(`Created PR #${response.data.number}: ${response.data.html_url}`);
-
-              // Add a comment with additional context
-              const commitCount = '${{ steps.branch-info.outputs.commits_clean }}'.split(',').length;
-              await github.rest.issues.createComment({
-                owner: owner,
-                repo: repo,
-                issue_number: response.data.number,
-                body: `🍒 Cherry-pick of ${commitCount} commit${commitCount > 1 ? 's' : ''} completed successfully for branch \`${{ matrix.branch }}\`.`
-              });
-
             } catch (error) {
               console.error('Failed to create PR:', error);
               throw error;
