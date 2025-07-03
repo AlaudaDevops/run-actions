@@ -44,10 +44,6 @@ permissions:
   contents: read          # checkout / git diff
   pull-requests: write    # create PR in target repo
 
-# (Optional) Prevent multiple syncs of the same ref running in parallel
-concurrency:
-  group: reverse-sync-${{ github.ref }}
-  cancel-in-progress: true
 jobs:
   reverse-sync:
     runs-on: ubuntu-latest
@@ -144,7 +140,7 @@ jobs:
         echo "parent_commit=$parent_commit" >> $GITHUB_OUTPUT
 
         # Get list of changed files in the commit, excluding ignored paths
-        ignore_pattern=$(echo "${{input.ignore_paths}}" | sed 's/,/|/g' | sed 's|/$||g')
+        ignore_pattern=$(echo "${{inputs.ignore_paths}}" | sed 's/,/|/g' | sed 's|/$||g')
         echo "🙈 Ignored paths: $ignore_pattern"
 
         git diff --name-only $parent_commit $commit_sha | grep -v -E "^($ignore_pattern)" > changed_files.txt || true
@@ -165,7 +161,7 @@ jobs:
       if: steps.check_pr_commit.outputs.is_pr_commit == 'true' && steps.check_pr_commit.outputs.skip_sync == 'false' && steps.get_changes.outputs.has_doc_changes == 'true'
       uses: actions/checkout@v4
       with:
-        repository: ${{input.target_repo}}
+        repository: ${{inputs.target_repo}}
         token: ${{ secrets.GH_TOKEN }}
         path: target-docs
         fetch-depth: 0
@@ -197,8 +193,8 @@ jobs:
         parent_commit="${{ steps.get_changes.outputs.parent_commit }}"
 
         # Create a patch with only the synced paths
-        echo "📑 Will only sync these paths: ${{input.synced_paths}}"
-        git format-patch $parent_commit..$commit_sha --stdout -- ${{input.synced_paths}} > changes.patch
+        echo "📑 Will only sync these paths: ${{inputs.synced_paths}}"
+        git format-patch $parent_commit..$commit_sha --stdout -- ${{inputs.synced_paths}} > changes.patch
 
         echo "📋 Generated Patch: "
         cat changes.patch
@@ -345,7 +341,7 @@ jobs:
           -H "Authorization: token ${{ secrets.GH_TOKEN }}" \
           -H "Accept: application/vnd.github.v3+json" \
           -H "Content-Type: application/json" \
-          https://api.github.com/repos/${{ input.target_repo }}/pulls \
+          https://api.github.com/repos/${{ inputs.target_repo }}/pulls \
           -d "$json_payload"
 
     - name: Create workflow summary
@@ -375,5 +371,5 @@ jobs:
           echo "- **Source PR**: #${{ steps.check_pr_commit.outputs.pr_number }} by @${{ steps.get_pr_info.outputs.pr_author }}" >> $GITHUB_STEP_SUMMARY
           echo "- **Branch**: ${{ steps.create_branch.outputs.branch_name }}" >> $GITHUB_STEP_SUMMARY
           echo "- **Base ref**: ${{ steps.get_pr_info.outputs.pr_base_ref }}" >> $GITHUB_STEP_SUMMARY
-          echo "- **Target repository**: ${{ input.target_repo }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Target repository**: ${{ inputs.target_repo }}" >> $GITHUB_STEP_SUMMARY
         fi
