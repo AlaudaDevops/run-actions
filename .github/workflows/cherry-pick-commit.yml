@@ -1,0 +1,196 @@
+name: Cherry-pick Commit to Multiple Branches
+
+on:
+  workflow_dispatch:
+    inputs:
+      repository:
+        required: true
+        description: 'Target repository (e.g., alaudadevops/repository)'
+        type: string
+      commit:
+        required: true
+        description: 'Commit hash to cherry-pick'
+        type: string
+      target_branches:
+        required: true
+        description: 'Comma-separated list of target branches (e.g., release-1.0,release-1.1,main)'
+        type: string
+      pr_title_prefix:
+        required: false
+        description: 'Prefix for PR titles (optional)'
+        type: string
+        default: '[Cherry-pick]'
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.set-matrix.outputs.matrix }}
+    steps:
+      - name: Prepare branch matrix
+        id: set-matrix
+        run: |
+          # Convert comma-separated branches to JSON array
+          branches="${{ inputs.target_branches }}"
+          # Remove spaces and convert to JSON array
+          branches_json=$(echo "$branches" | sed 's/[[:space:]]//g' | sed 's/,/","/g' | sed 's/^/["/' | sed 's/$/"]/')
+          echo "matrix={\"branch\":$branches_json}" >> $GITHUB_OUTPUT
+          echo "Generated matrix: {\"branch\":$branches_json}"
+
+  cherry-pick:
+    needs: prepare
+    runs-on: ubuntu-latest
+    strategy:
+      matrix: ${{ fromJson(needs.prepare.outputs.matrix) }}
+      fail-fast: false  # Continue with other branches even if one fails
+
+    steps:
+      - name: Generate branch name
+        id: branch-info
+        run: |
+          # Create a unique branch name for the cherry-pick
+          commit_short="${{ inputs.commit }}"
+          commit_short=${commit_short:0:8}
+          branch_name="cherry-pick-${commit_short}-to-${{ matrix.branch }}"
+          echo "branch_name=$branch_name" >> $GITHUB_OUTPUT
+          echo "commit_short=$commit_short" >> $GITHUB_OUTPUT
+
+      - name: Checkout target repository
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ inputs.repository }}
+          ref: ${{ matrix.branch }}
+          token: ${{ secrets.TOKEN }}
+          fetch-depth: 0  # Fetch full history for cherry-pick
+
+      - name: Configure Git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Create new branch
+        run: |
+          git checkout -b ${{ steps.branch-info.outputs.branch_name }}
+
+      - name: Cherry-pick commit
+        id: cherry-pick
+        run: |
+          echo "Attempting to cherry-pick commit ${{ inputs.commit }} to branch ${{ matrix.branch }}"
+
+          # Try to cherry-pick the commit
+          if git cherry-pick ${{ inputs.commit }}; then
+            echo "Cherry-pick successful"
+            echo "success=true" >> $GITHUB_OUTPUT
+          else
+            echo "Cherry-pick failed - conflicts detected"
+            echo "success=false" >> $GITHUB_OUTPUT
+
+            # Get conflict information
+            echo "Conflicted files:"
+            git status --porcelain | grep "^UU\|^AA\|^DD" || true
+
+            # Abort the cherry-pick
+            git cherry-pick --abort
+            exit 1
+          fi
+
+      - name: Push new branch
+        if: steps.cherry-pick.outputs.success == 'true'
+        run: |
+          git push origin ${{ steps.branch-info.outputs.branch_name }}
+
+      - name: Get commit details
+        if: steps.cherry-pick.outputs.success == 'true'
+        id: commit-details
+        run: |
+          # Get the original commit message and author
+          commit_message=$(git log --format=%B -n 1 ${{ inputs.commit }})
+          commit_author=$(git log --format="%an <%ae>" -n 1 ${{ inputs.commit }})
+
+          # Escape newlines and quotes for GitHub output
+          commit_message_escaped=$(echo "$commit_message" | sed ':a;N;$!ba;s/\n/\\n/g' | sed 's/"/\\"/g')
+
+          echo "commit_message=$commit_message_escaped" >> $GITHUB_OUTPUT
+          echo "commit_author=$commit_author" >> $GITHUB_OUTPUT
+
+      - name: Create Pull Request
+        if: steps.cherry-pick.outputs.success == 'true'
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.TOKEN }}
+          script: |
+            const [owner, repo] = '${{ inputs.repository }}'.split('/');
+
+            const prTitle = `${{ inputs.pr_title_prefix }} ${{ steps.commit-details.outputs.commit_message }}`.split('\\n')[0];
+            const prBody = `
+            ## Cherry-pick Summary
+
+            This PR cherry-picks commit \`${{ inputs.commit }}\` to branch \`${{ matrix.branch }}\`.
+
+            **Original commit:** ${{ inputs.commit }}
+            **Original author:** ${{ steps.commit-details.outputs.commit_author }}
+            **Target branch:** ${{ matrix.branch }}
+
+            ## Original Commit Message
+
+            \`\`\`
+            ${{ steps.commit-details.outputs.commit_message }}
+            \`\`\`
+
+            ---
+
+            *This PR was automatically created by the cherry-pick workflow.*
+            `;
+
+            try {
+              const response = await github.rest.pulls.create({
+                owner: owner,
+                repo: repo,
+                title: prTitle,
+                head: '${{ steps.branch-info.outputs.branch_name }}',
+                base: '${{ matrix.branch }}',
+                body: prBody
+              });
+
+              console.log(`Created PR #${response.data.number}: ${response.data.html_url}`);
+
+              // Add a comment with additional context
+              await github.rest.issues.createComment({
+                owner: owner,
+                repo: repo,
+                issue_number: response.data.number,
+                body: `🍒 Cherry-pick of commit ${{ inputs.commit }} completed successfully for branch \`${{ matrix.branch }}\`.`
+              });
+
+            } catch (error) {
+              console.error('Failed to create PR:', error);
+              throw error;
+            }
+
+      - name: Report failure
+        if: failure()
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.TOKEN }}
+          script: |
+            console.log(`❌ Cherry-pick failed for branch ${{ matrix.branch }}`);
+            console.log(`Commit: ${{ inputs.commit }}`);
+            console.log(`Repository: ${{ inputs.repository }}`);
+
+            // You could optionally create an issue or send a notification here
+            // For now, we'll just log the failure
+
+  summary:
+    needs: [prepare, cherry-pick]
+    runs-on: ubuntu-latest
+    if: always()  # Run even if some cherry-picks failed
+    steps:
+      - name: Summary
+        run: |
+          echo "## Cherry-pick Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Repository:** ${{ inputs.repository }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Commit:** ${{ inputs.commit }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Target branches:** ${{ inputs.target_branches }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Check the individual job results above for detailed status of each branch." >> $GITHUB_STEP_SUMMARY
