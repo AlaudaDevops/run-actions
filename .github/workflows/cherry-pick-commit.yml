@@ -1,4 +1,4 @@
-name: Cherry-pick Commit to Multiple Branches
+name: Cherry-pick Commits to Branches
 
 on:
   workflow_dispatch:
@@ -7,9 +7,9 @@ on:
         required: true
         description: 'Target repository (e.g., alaudadevops/repository)'
         type: string
-      commit:
+      commits:
         required: true
-        description: 'Commit hash to cherry-pick'
+        description: 'Comma-separated list of commit hashes to cherry-pick (in order)'
         type: string
       target_branches:
         required: true
@@ -45,15 +45,30 @@ jobs:
       fail-fast: false  # Continue with other branches even if one fails
 
     steps:
-      - name: Generate branch name
+      - name: Generate branch name and prepare commits
         id: branch-info
         run: |
-          # Create a unique branch name for the cherry-pick
-          commit_short="${{ inputs.commit }}"
-          commit_short=${commit_short:0:8}
-          branch_name="cherry-pick-${commit_short}-to-${{ matrix.branch }}"
+          # Parse commits and create a unique branch name
+          commits="${{ inputs.commits }}"
+          # Remove spaces and split by comma
+          commits_clean=$(echo "$commits" | sed 's/[[:space:]]//g')
+
+          # Get first and last commit for branch naming
+          first_commit=$(echo "$commits_clean" | cut -d',' -f1)
+          last_commit=$(echo "$commits_clean" | rev | cut -d',' -f1 | rev)
+
+          first_short=${first_commit:0:8}
+          if [ "$first_commit" = "$last_commit" ]; then
+            branch_name="cherry-pick-${first_short}-to-${{ matrix.branch }}"
+          else
+            last_short=${last_commit:0:8}
+            branch_name="cherry-pick-${first_short}-${last_short}-to-${{ matrix.branch }}"
+          fi
+
           echo "branch_name=$branch_name" >> $GITHUB_OUTPUT
-          echo "commit_short=$commit_short" >> $GITHUB_OUTPUT
+          echo "commits_clean=$commits_clean" >> $GITHUB_OUTPUT
+          echo "first_commit=$first_commit" >> $GITHUB_OUTPUT
+          echo "last_commit=$last_commit" >> $GITHUB_OUTPUT
 
       - name: Checkout target repository
         uses: actions/checkout@v4
@@ -72,25 +87,45 @@ jobs:
         run: |
           git checkout -b ${{ steps.branch-info.outputs.branch_name }}
 
-      - name: Cherry-pick commit
+      - name: Cherry-pick commits
         id: cherry-pick
         run: |
-          echo "Attempting to cherry-pick commit ${{ inputs.commit }} to branch ${{ matrix.branch }}"
+          commits="${{ steps.branch-info.outputs.commits_clean }}"
+          echo "Attempting to cherry-pick commits: $commits to branch ${{ matrix.branch }}"
 
-          # Try to cherry-pick the commit
-          if git cherry-pick ${{ inputs.commit }}; then
-            echo "Cherry-pick successful"
+          # Convert comma-separated commits to array
+          IFS=',' read -ra COMMIT_ARRAY <<< "$commits"
+
+          success=true
+          failed_commit=""
+
+          # Cherry-pick each commit in order
+          for commit in "${COMMIT_ARRAY[@]}"; do
+            echo "Cherry-picking commit: $commit"
+            if ! git cherry-pick "$commit"; then
+              echo "Cherry-pick failed for commit $commit - conflicts detected"
+              success=false
+              failed_commit="$commit"
+
+              # Get conflict information
+              echo "Conflicted files:"
+              git status --porcelain | grep "^UU\|^AA\|^DD" || true
+
+              # Abort the cherry-pick
+              git cherry-pick --abort
+              break
+            else
+              echo "Successfully cherry-picked commit: $commit"
+            fi
+          done
+
+          if [ "$success" = true ]; then
+            echo "All cherry-picks successful"
             echo "success=true" >> $GITHUB_OUTPUT
           else
-            echo "Cherry-pick failed - conflicts detected"
+            echo "Cherry-pick failed at commit: $failed_commit"
             echo "success=false" >> $GITHUB_OUTPUT
-
-            # Get conflict information
-            echo "Conflicted files:"
-            git status --porcelain | grep "^UU\|^AA\|^DD" || true
-
-            # Abort the cherry-pick
-            git cherry-pick --abort
+            echo "failed_commit=$failed_commit" >> $GITHUB_OUTPUT
             exit 1
           fi
 
@@ -103,15 +138,31 @@ jobs:
         if: steps.cherry-pick.outputs.success == 'true'
         id: commit-details
         run: |
-          # Get the original commit message and author
-          commit_message=$(git log --format=%B -n 1 ${{ inputs.commit }})
-          commit_author=$(git log --format="%an <%ae>" -n 1 ${{ inputs.commit }})
+          commits="${{ steps.branch-info.outputs.commits_clean }}"
+          IFS=',' read -ra COMMIT_ARRAY <<< "$commits"
+
+          # For PR title, use the first commit's message
+          first_commit="${{ steps.branch-info.outputs.first_commit }}"
+          commit_message=$(git log --format=%B -n 1 "$first_commit")
+          commit_author=$(git log --format="%an <%ae>" -n 1 "$first_commit")
 
           # Escape newlines and quotes for GitHub output
           commit_message_escaped=$(echo "$commit_message" | sed ':a;N;$!ba;s/\n/\\n/g' | sed 's/"/\\"/g')
 
           echo "commit_message=$commit_message_escaped" >> $GITHUB_OUTPUT
           echo "commit_author=$commit_author" >> $GITHUB_OUTPUT
+
+          # Generate detailed commit list for PR body
+          commit_details=""
+          for commit in "${COMMIT_ARRAY[@]}"; do
+            msg=$(git log --format="%h - %s" -n 1 "$commit")
+            author=$(git log --format="%an" -n 1 "$commit")
+            commit_details="${commit_details}- \`${commit}\`: ${msg} (by ${author})\n"
+          done
+
+          # Escape for GitHub output
+          commit_details_escaped=$(echo -e "$commit_details" | sed ':a;N;$!ba;s/\n/\\n/g' | sed 's/"/\\"/g')
+          echo "commit_details=$commit_details_escaped" >> $GITHUB_OUTPUT
 
       - name: Create Pull Request
         if: steps.cherry-pick.outputs.success == 'true'
@@ -121,18 +172,33 @@ jobs:
           script: |
             const [owner, repo] = '${{ inputs.repository }}'.split('/');
 
-            const prTitle = `${{ inputs.pr_title_prefix }} ${{ steps.commit-details.outputs.commit_message }}`.split('\\n')[0];
+            const commits = '${{ steps.branch-info.outputs.commits_clean }}'.split(',');
+            const commitCount = commits.length;
+
+            let prTitle;
+            if (commitCount === 1) {
+              prTitle = `${{ inputs.pr_title_prefix }} ${{ steps.commit-details.outputs.commit_message }}`.split('\\n')[0];
+            } else {
+              prTitle = `${{ inputs.pr_title_prefix }} ${commitCount} commits to ${{ matrix.branch }}`;
+            }
+
             const prBody = `
             ## Cherry-pick Summary
 
-            This PR cherry-picks commit \`${{ inputs.commit }}\` to branch \`${{ matrix.branch }}\`.
+            This PR cherry-picks ${commitCount} commit${commitCount > 1 ? 's' : ''} to branch \`${{ matrix.branch }}\`.
 
-            **Original commit:** ${{ inputs.commit }}
-            **Original author:** ${{ steps.commit-details.outputs.commit_author }}
             **Target branch:** ${{ matrix.branch }}
+            **Commits cherry-picked:** ${commitCount}
 
-            ## Original Commit Message
+            ## Commits Included
 
+            ${{ steps.commit-details.outputs.commit_details }}
+
+            ## Primary Commit Details
+
+            **Original author:** ${{ steps.commit-details.outputs.commit_author }}
+
+            **Original commit message:**
             \`\`\`
             ${{ steps.commit-details.outputs.commit_message }}
             \`\`\`
@@ -155,11 +221,12 @@ jobs:
               console.log(`Created PR #${response.data.number}: ${response.data.html_url}`);
 
               // Add a comment with additional context
+              const commitCount = '${{ steps.branch-info.outputs.commits_clean }}'.split(',').length;
               await github.rest.issues.createComment({
                 owner: owner,
                 repo: repo,
                 issue_number: response.data.number,
-                body: `🍒 Cherry-pick of commit ${{ inputs.commit }} completed successfully for branch \`${{ matrix.branch }}\`.`
+                body: `🍒 Cherry-pick of ${commitCount} commit${commitCount > 1 ? 's' : ''} completed successfully for branch \`${{ matrix.branch }}\`.`
               });
 
             } catch (error) {
@@ -174,7 +241,7 @@ jobs:
           github-token: ${{ secrets.TOKEN }}
           script: |
             console.log(`❌ Cherry-pick failed for branch ${{ matrix.branch }}`);
-            console.log(`Commit: ${{ inputs.commit }}`);
+            console.log(`Commits: ${{ inputs.commits }}`);
             console.log(`Repository: ${{ inputs.repository }}`);
 
             // You could optionally create an issue or send a notification here
@@ -190,7 +257,7 @@ jobs:
           echo "## Cherry-pick Summary" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "**Repository:** ${{ inputs.repository }}" >> $GITHUB_STEP_SUMMARY
-          echo "**Commit:** ${{ inputs.commit }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Commits:** ${{ inputs.commits }}" >> $GITHUB_STEP_SUMMARY
           echo "**Target branches:** ${{ inputs.target_branches }}" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "Check the individual job results above for detailed status of each branch." >> $GITHUB_STEP_SUMMARY
