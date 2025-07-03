@@ -182,8 +182,8 @@ jobs:
               prTitle = `${{ inputs.pr_title_prefix }} ${commitCount} commits to ${{ matrix.branch }}`;
             }
 
-            const prBody = `
-            ## Cherry-pick Summary
+            const prBody =
+            `## Cherry-pick Summary
 
             This PR cherry-picks ${commitCount} commit${commitCount > 1 ? 's' : ''} to branch \`${{ matrix.branch }}\`.
 
@@ -199,14 +199,13 @@ jobs:
             **Original author:** ${{ steps.commit-details.outputs.commit_author }}
 
             **Original commit message:**
-            \`\`\`
+            ` + '```' + `
             ${{ steps.commit-details.outputs.commit_message }}
-            \`\`\`
+            ` + '```' + `
 
             ---
 
-            *This PR was automatically created by the cherry-pick workflow.*
-            `;
+            *This PR was automatically created by the cherry-pick workflow.*`;
 
             try {
               const response = await github.rest.pulls.create({
