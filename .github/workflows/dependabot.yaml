@@ -23,7 +23,7 @@ on:
         default: |
           python run-bot.py
 jobs:
-  setup-org-rules:
+  dependabot-runner:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4 # https://github.com/marketplace/actions/checkout
