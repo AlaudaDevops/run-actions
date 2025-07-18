@@ -1,0 +1,31 @@
+name: setup-org-rules
+on:
+  schedule:
+    # all input default values should be added into the workflow directly
+    # https://stackoverflow.com/questions/72539900/schedule-trigger-github-action-workflow-with-input-parameters
+    - cron: '0 0 * * 0' # every Sunday at midnight
+
+jobs:
+  setup-org-rules:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4 # https://github.com/marketplace/actions/checkout
+        with:
+          repository: alaudadevops/hack
+          ref: main
+          token: ${{ secrets.TOKEN }}
+      - name: Install GH CLI
+        uses: dev-hanz-ops/install-gh-cli-action@v0.2.1
+      - name: Run script
+        run: |
+          echo -n "${{ secrets.TOKEN }}" > secret.token
+
+          set -ex
+
+          echo "==> 🚀 Will start to run script!!"
+
+          gh auth login --with-token < secret.token
+
+          ./scripts/setup-repos.sh alauda devops-docs,devops-pipelines-docs,devops-connectors-docs,gitlab-docs,harbor-docs,sonarqube-docs,nexus-docs
+
+          echo "==> 🎉 done!"
