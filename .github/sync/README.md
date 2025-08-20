@@ -29,8 +29,9 @@ This directory contains GitHub Actions workflows and configuration for synchroni
 3. **Configure required Secrets**
    - `TOKEN`: GitHub token with repository access
 
-4. **Prepare template files**
-   - Place files to sync in `.github/sync/templates/` directory
+4. **Prepare source repositories**
+   - Set up centralized template repositories with files to sync
+   - Configure source repositories and branches in your sync configuration
 
 ## Workflow Features
 
@@ -43,10 +44,10 @@ This directory contains GitHub Actions workflows and configuration for synchroni
 - Regular expression matching for repository names using `regex:` prefix
 
 ### Multi-Source Repository Support
-- Sync files from current repository (default behavior)
-- Sync files from other repositories in the organization
+- Sync files from centralized template repositories (recommended approach)
+- Support for syncing from different source repositories and branches
 - Intelligent caching - same source repositories are cloned only once
-- Support for different source branches for each file
+- Fallback support for current repository files when needed
 
 ### Smart Sync
 - Content comparison - only creates PRs when files actually differ
@@ -122,9 +123,9 @@ files:
 
 #### Source Repository Options
 
-- **Current Repository** (default): If `source_repo` is not specified or set to `"current"`, files are synced from the current repository
-- **External Repository**: Specify `source_repo` in `"owner/repository"` format to sync from other repositories
+- **External Repository** (recommended): Specify `source_repo` in `"owner/repository"` format to sync from centralized template repositories
 - **Source Branch**: Use `source_branch` to specify which branch to sync from (defaults to `"main"`)
+- **Current Repository** (fallback): If `source_repo` is not specified or set to `"current"`, files are synced from the current repository
 
 #### Performance Optimization
 
@@ -135,11 +136,11 @@ The workflow automatically optimizes repository cloning:
 
 ## Configuration Examples
 
-### Basic Configuration (Current Repository)
+### Recommended Configuration (External Repositories)
 
 ```yaml
 # Optional: Customize PR title format
-pr_title: "chore: sync security files to"
+pr_title: "chore: sync files from templates to"
 
 # Optional: Target branches (defaults to "default")
 target_branches: "default"
@@ -151,20 +152,25 @@ skip_public_repos: false
 org_name: "AlaudaDevops"
 
 files:
-  # Files from current repository (default behavior)
-  - source: ".github/sync/templates/SECURITY.md"
+  # Files from centralized template repositories (recommended approach)
+  - source: "templates/SECURITY.md"
     target: "SECURITY.md"
-    description: "Security policy file"
-  - source: ".github/sync/templates/.gitignore"
+    source_repo: "AlaudaDevops/org-templates"
+    source_branch: "main"
+    description: "Security policy from org templates"
+
+  - source: "configs/.gitignore"
     target: ".gitignore"
-    description: "Standard gitignore file"
+    source_repo: "AlaudaDevops/config-templates"
+    source_branch: "main"
+    description: "Standard gitignore from config templates"
 
 repositories:
   - "AlaudaDevops/repo1"
   - "AlaudaDevops/repo2"
 ```
 
-### Multi-Source Repository Configuration
+### Advanced Multi-Source Configuration
 
 ```yaml
 # Optional: Customize PR title format
@@ -180,36 +186,42 @@ skip_public_repos: true
 org_name: "AlaudaDevops"
 
 files:
-  # File from current repository
-  - source: ".tekton/pr-manage.yaml"
+  # Files from external template repositories (recommended approach)
+  - source: "pipelines/pr-manage.yaml"
     target: ".tekton/pr-manage.yaml"
-    description: "PR management pipeline from current repo"
+    source_repo: "AlaudaDevops/tekton-templates"
+    source_branch: "main"
+    description: "PR management pipeline from tekton templates"
 
-  # Files from external repositories
   - source: "templates/Makefile"
     target: "Makefile"
     source_repo: "AlaudaDevops/build-templates"
     source_branch: "main"
-    description: "Standard Makefile from build-templates"
+    description: "Standard Makefile from build templates"
 
   - source: ".github/workflows/ci.yaml"
     target: ".github/workflows/ci.yaml"
     source_repo: "AlaudaDevops/workflow-templates"
     source_branch: "v2.0"
-    description: "CI workflow from workflow-templates v2.0"
+    description: "CI workflow from workflow templates v2.0"
 
   # Multiple files from same external repository (cloned only once)
   - source: "scripts/build.sh"
     target: "scripts/build.sh"
     source_repo: "AlaudaDevops/build-templates"
     source_branch: "main"
-    description: "Build script"
+    description: "Build script from build templates"
 
   - source: "scripts/test.sh"
     target: "scripts/test.sh"
     source_repo: "AlaudaDevops/build-templates"
     source_branch: "main"
-    description: "Test script"
+    description: "Test script from build templates"
+
+  # Fallback: file from current repository (when needed)
+  # - source: ".tekton/custom-pipeline.yaml"
+  #   target: ".tekton/custom-pipeline.yaml"
+  #   description: "Custom pipeline specific to this repo"
 
 repositories:
   - "regex:AlaudaDevops/.*"
