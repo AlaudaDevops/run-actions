@@ -193,35 +193,24 @@ jobs:
               for pattern in "${BRANCH_PATTERNS[@]}"; do
                 pattern=$(echo "$pattern" | xargs) # trim whitespace
                 echo "🔍 Checking pattern: '$pattern'"
-                if [[ "$pattern" == *"*"* ]]; then
-                  # Pattern matching
-                  echo "🔧 Using wildcard matching for: '$pattern'"
-                  for branch in $all_branches; do
-                    if [[ "$branch" == $pattern ]]; then
-                      echo "✅ Branch '$branch' matches pattern '$pattern'"
-                      target_branches="$target_branches $branch"
+
+                # Check if pattern is 'default' - use repo's default branch
+                if [[ "$pattern" == "default" ]]; then
+                  echo "🔧 Using default branch for: '$pattern' -> '$default_branch'"
+                  target_branches="$target_branches $default_branch"
+                else
+                  # Use grep extended regex for all pattern matching
+                  echo "🔧 Using grep regex matching for: '$pattern'"
+                  echo "$all_branches" | tr ' ' '\n' | grep -E "^${pattern}$" | while read -r matched_branch; do
+                    if [ -n "$matched_branch" ]; then
+                      echo "✅ Branch '$matched_branch' matches regex pattern '$pattern'"
+                      target_branches="$target_branches $matched_branch"
                     fi
                   done
-                else
-                  # Check if pattern is 'default' - use repo's default branch
-                  if [[ "$pattern" == "default" ]]; then
-                    echo "🔧 Using default branch for: '$pattern' -> '$default_branch'"
-                    target_branches="$target_branches $default_branch"
-                  else
-                    # Exact match
-                    echo "🔧 Using exact matching for: '$pattern'"
-                    found=false
-                    for branch in $all_branches; do
-                      if [[ "$branch" == "$pattern" ]]; then
-                        echo "✅ Branch '$pattern' found in repository"
-                        target_branches="$target_branches $branch"
-                        found=true
-                        break
-                      fi
-                    done
-                    if [ "$found" = false ]; then
-                      echo "❌ Branch '$pattern' not found in repository"
-                    fi
+
+                  # Check if any matches were found
+                  if ! echo "$all_branches" | tr ' ' '\n' | grep -qE "^${pattern}$"; then
+                    echo "❌ No branches match regex pattern '$pattern'"
                   fi
                 fi
               done
