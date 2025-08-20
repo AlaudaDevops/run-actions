@@ -132,6 +132,39 @@ jobs:
           echo "📋 Target branches from config: $TARGET_BRANCHES"
           echo "branches=$TARGET_BRANCHES" >> $GITHUB_OUTPUT
 
+      - name: Clone source repositories
+        id: clone-sources
+        run: |
+          CONFIG_FILE="${{ inputs.config_file }}"
+
+          # Create directory for source repositories
+          mkdir -p source-repos
+
+          # Track unique source repositories to avoid duplicate clones
+          declare -A cloned_repos
+
+          # Parse all files and identify unique source repositories
+          file_count=$(yq eval '.files | length' "$CONFIG_FILE")
+          for ((i=0; i<file_count; i++)); do
+            source_repo=$(yq eval ".files[$i].source_repo // \"current\"" "$CONFIG_FILE")
+            source_branch=$(yq eval ".files[$i].source_branch // \"main\"" "$CONFIG_FILE")
+
+            if [ "$source_repo" != "current" ]; then
+              repo_key="${source_repo}_${source_branch}"
+              if [[ ! ${cloned_repos[$repo_key]+_} ]]; then
+                echo "🔄 Cloning source repository: $source_repo (branch: $source_branch)"
+                clone_dir="source-repos/$(echo "$source_repo" | sed 's/\//_/g')_${source_branch}"
+                git clone --quiet --depth 1 --branch "$source_branch" "https://x-access-token:${{ secrets.TOKEN }}@github.com/$source_repo.git" "$clone_dir"
+                cloned_repos[$repo_key]="$clone_dir"
+                echo "✅ Cloned $source_repo:$source_branch to $clone_dir"
+              else
+                echo "⚡ Repository $source_repo:$source_branch already cloned"
+              fi
+            fi
+          done
+
+          echo "source_repos_cloned=true" >> $GITHUB_OUTPUT
+
       - name: Sync files to repositories
         run: |
           CONFIG_FILE="${{ inputs.config_file }}"
@@ -208,9 +241,19 @@ jobs:
               for ((i=0; i<file_count; i++)); do
                 source_path=$(yq eval ".files[$i].source" "$CONFIG_FILE")
                 target_path=$(yq eval ".files[$i].target" "$CONFIG_FILE")
+                source_repo=$(yq eval ".files[$i].source_repo // \"current\"" "$CONFIG_FILE")
+                source_branch=$(yq eval ".files[$i].source_branch // \"main\"" "$CONFIG_FILE")
 
-                if [ ! -f "$source_path" ]; then
-                  echo "⚠️ Source file $source_path not found, skipping"
+                # Determine actual source file path
+                if [ "$source_repo" = "current" ]; then
+                  actual_source_path="$source_path"
+                else
+                  clone_dir="source-repos/$(echo "$source_repo" | sed 's/\//_/g')_${source_branch}"
+                  actual_source_path="$clone_dir/$source_path"
+                fi
+
+                if [ ! -f "$actual_source_path" ]; then
+                  echo "⚠️ Source file $actual_source_path not found (repo: $source_repo, branch: $source_branch), skipping"
                   continue
                 fi
 
@@ -218,16 +261,16 @@ jobs:
                 if gh api "repos/$repo/contents/$target_path?ref=$branch" >/dev/null 2>&1; then
                   # File exists, check if content differs
                   remote_content=$(gh api "repos/$repo/contents/$target_path?ref=$branch" --jq '.content' | base64 -d)
-                  local_content=$(cat "$source_path")
+                  local_content=$(cat "$actual_source_path")
 
                   if [ "$remote_content" != "$local_content" ]; then
-                    echo "🔄 File $target_path differs in $repo:$branch"
+                    echo "🔄 File $target_path differs in $repo:$branch (source: $source_repo:$source_branch)"
                     needs_pr=true
                   else
                     echo "✅ File $target_path is up to date in $repo:$branch"
                   fi
                 else
-                  echo "➕ File $target_path missing in $repo:$branch"
+                  echo "➕ File $target_path missing in $repo:$branch (source: $source_repo:$source_branch)"
                   needs_pr=true
                 fi
               done
@@ -245,13 +288,26 @@ jobs:
                 # Copy files
                 file_count=$(yq eval '.files | length' "$GITHUB_WORKSPACE/$CONFIG_FILE")
                 for ((j=0; j<file_count; j++)); do
-                  source_path="$GITHUB_WORKSPACE/$(yq eval ".files[$j].source" "$GITHUB_WORKSPACE/$CONFIG_FILE")"
+                  source_path=$(yq eval ".files[$j].source" "$GITHUB_WORKSPACE/$CONFIG_FILE")
                   target_path=$(yq eval ".files[$j].target" "$GITHUB_WORKSPACE/$CONFIG_FILE")
+                  source_repo=$(yq eval ".files[$j].source_repo // \"current\"" "$GITHUB_WORKSPACE/$CONFIG_FILE")
+                  source_branch=$(yq eval ".files[$j].source_branch // \"main\"" "$GITHUB_WORKSPACE/$CONFIG_FILE")
 
-                  if [ -f "$source_path" ]; then
+                  # Determine actual source file path
+                  if [ "$source_repo" = "current" ]; then
+                    actual_source_path="$GITHUB_WORKSPACE/$source_path"
+                  else
+                    clone_dir="$GITHUB_WORKSPACE/source-repos/$(echo "$source_repo" | sed 's/\//_/g')_${source_branch}"
+                    actual_source_path="$clone_dir/$source_path"
+                  fi
+
+                  if [ -f "$actual_source_path" ]; then
                     mkdir -p "$(dirname "$target_path")"
-                    cp "$source_path" "$target_path"
+                    cp "$actual_source_path" "$target_path"
                     git add "$target_path"
+                    echo "📄 Copied $actual_source_path -> $target_path"
+                  else
+                    echo "⚠️ Source file $actual_source_path not found during copy, skipping"
                   fi
                 done
 

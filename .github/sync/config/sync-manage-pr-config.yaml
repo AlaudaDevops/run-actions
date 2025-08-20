@@ -35,7 +35,7 @@ repositories:
 
 # Files to sync - array of file mappings
 files:
-  # Basic file sync example
+  # Basic file sync example (from current repository)
   - source: ".tekton/pr-manage.yaml"
     target: ".tekton/pr-manage.yaml"
     # Optional: description of what this file is for

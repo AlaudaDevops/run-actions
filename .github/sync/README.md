@@ -42,6 +42,12 @@ This directory contains GitHub Actions workflows and configuration for synchroni
 - Exact match for specific repositories
 - Regular expression matching for repository names using `regex:` prefix
 
+### Multi-Source Repository Support
+- Sync files from current repository (default behavior)
+- Sync files from other repositories in the organization
+- Intelligent caching - same source repositories are cloned only once
+- Support for different source branches for each file
+
 ### Smart Sync
 - Content comparison - only creates PRs when files actually differ
 - Dry run mode - preview operations without actually executing
@@ -101,9 +107,35 @@ org_name: "AlaudaDevops"
 - **Usage**: Defines which GitHub organization to sync files to
 - **Example**: `"AlaudaDevops"`, `"your-org-name"`
 
+### File Source Configuration
+
+Each file in the `files` array supports the following options:
+
+```yaml
+files:
+  - source: "path/to/source/file"        # Required: path to source file
+    target: "path/to/target/file"        # Required: path in target repositories
+    source_repo: "owner/repository"      # Optional: source repository (defaults to current)
+    source_branch: "main"                # Optional: source branch (defaults to "main")
+    description: "File description"      # Optional: description of the file
+```
+
+#### Source Repository Options
+
+- **Current Repository** (default): If `source_repo` is not specified or set to `"current"`, files are synced from the current repository
+- **External Repository**: Specify `source_repo` in `"owner/repository"` format to sync from other repositories
+- **Source Branch**: Use `source_branch` to specify which branch to sync from (defaults to `"main"`)
+
+#### Performance Optimization
+
+The workflow automatically optimizes repository cloning:
+- Repositories with the same `source_repo` + `source_branch` combination are cloned only once
+- Multiple files from the same source repository reuse the same clone
+- This significantly improves performance when syncing many files from external repositories
+
 ## Configuration Examples
 
-### Basic Configuration
+### Basic Configuration (Current Repository)
 
 ```yaml
 # Optional: Customize PR title format
@@ -119,6 +151,7 @@ skip_public_repos: false
 org_name: "AlaudaDevops"
 
 files:
+  # Files from current repository (default behavior)
   - source: ".github/sync/templates/SECURITY.md"
     target: "SECURITY.md"
     description: "Security policy file"
@@ -127,8 +160,59 @@ files:
     description: "Standard gitignore file"
 
 repositories:
-  - "alauda/repo1"
-  - "alauda/repo2"
+  - "AlaudaDevops/repo1"
+  - "AlaudaDevops/repo2"
+```
+
+### Multi-Source Repository Configuration
+
+```yaml
+# Optional: Customize PR title format
+pr_title: "chore: sync files from multiple sources to"
+
+# Optional: Target branches
+target_branches: "main,release-*"
+
+# Optional: Skip public repositories
+skip_public_repos: true
+
+# Required: Organization name
+org_name: "AlaudaDevops"
+
+files:
+  # File from current repository
+  - source: ".tekton/pr-manage.yaml"
+    target: ".tekton/pr-manage.yaml"
+    description: "PR management pipeline from current repo"
+
+  # Files from external repositories
+  - source: "templates/Makefile"
+    target: "Makefile"
+    source_repo: "AlaudaDevops/build-templates"
+    source_branch: "main"
+    description: "Standard Makefile from build-templates"
+
+  - source: ".github/workflows/ci.yaml"
+    target: ".github/workflows/ci.yaml"
+    source_repo: "AlaudaDevops/workflow-templates"
+    source_branch: "v2.0"
+    description: "CI workflow from workflow-templates v2.0"
+
+  # Multiple files from same external repository (cloned only once)
+  - source: "scripts/build.sh"
+    target: "scripts/build.sh"
+    source_repo: "AlaudaDevops/build-templates"
+    source_branch: "main"
+    description: "Build script"
+
+  - source: "scripts/test.sh"
+    target: "scripts/test.sh"
+    source_repo: "AlaudaDevops/build-templates"
+    source_branch: "main"
+    description: "Test script"
+
+repositories:
+  - "regex:AlaudaDevops/.*"
 ```
 
 ### Regular Expression Repository Matching
@@ -182,17 +266,21 @@ repositories:
 
 1. **Load Configuration** - Validate and load sync configuration YAML file
 2. **Repository Discovery** - Get target repository list from organization (supports exact match and regex patterns)
-3. **Branch Resolution** - Resolve target branches based on patterns (default, specific branches, or wildcards)
-4. **File Comparison** - Compare local source files with remote target files to detect differences
-5. **PR Creation** - Create Pull Requests only for repositories with file differences
-6. **Content Sync** - Clone, copy files, commit changes with descriptive messages, and push to create PRs
+3. **Source Repository Cloning** - Intelligently clone external source repositories (with caching to avoid duplicates)
+4. **Branch Resolution** - Resolve target branches based on patterns (default, specific branches, or wildcards)
+5. **File Comparison** - Compare source files (from current or external repos) with remote target files to detect differences
+6. **PR Creation** - Create Pull Requests only for repositories with file differences
+7. **Content Sync** - Clone target repos, copy files from source locations, commit changes with descriptive messages, and push to create PRs
 
 ## Troubleshooting
 
 - **Config file not found**: Ensure configuration file path is correct
 - **Invalid YAML**: Validate configuration file syntax
-- **Permission denied**: Check `ORG_REPO_TOKEN` permissions
-- **Branch not found**: Verify target branches exist in target repositories
+- **Permission denied**: Check `TOKEN` permissions for both target and source repositories
+- **Source repository access denied**: Ensure token has access to external source repositories
+- **Source branch not found**: Verify source branches exist in source repositories
+- **Source file not found**: Check source file paths in source repositories
+- **Target branch not found**: Verify target branches exist in target repositories
 - **No changes detected**: Files are already up to date in target repositories
 
 ## Best Practices
@@ -205,14 +293,22 @@ repositories:
 
 ## Example Scenarios
 
-### Sync Security Policy to All Repositories
+### Sync Security Policy to All Repositories (Current Repository)
 - Config: All repositories' default branches
-- Files: `SECURITY.md`, `CODE_OF_CONDUCT.md`
+- Files: `SECURITY.md`, `CODE_OF_CONDUCT.md` from current repository
 
-### Update CI Configuration to Release Branches
+### Update CI Configuration to Release Branches (External Repository)
 - Config: `release-*` branch pattern
-- Files: `.github/workflows/ci.yml`, `.github/dependabot.yml`
+- Files: `.github/workflows/ci.yml` from `AlaudaDevops/workflow-templates`
+- Files: `.github/dependabot.yml` from `AlaudaDevops/config-templates`
 
-### Sync Governance Files to Service Repositories
-- Config: `regex:alauda/service-.*` repository pattern
-- Files: `SECURITY.md`, `CODE_OF_CONDUCT.md`, `CONTRIBUTING.md`
+### Sync Build Configuration from Centralized Templates
+- Config: All service repositories (`regex:AlaudaDevops/service-.*`)
+- Files: `Makefile`, `scripts/build.sh`, `scripts/test.sh` from `AlaudaDevops/build-templates:main`
+- Files: `Dockerfile` from `AlaudaDevops/docker-templates:v2.0`
+
+### Mix Current and External Repository Files
+- Config: All repositories' default branches
+- Files: `SECURITY.md` from current repository (organization-specific policy)
+- Files: `.github/workflows/ci.yml` from `AlaudaDevops/workflow-templates:main` (standardized CI)
+- Files: `Makefile` from `AlaudaDevops/build-templates:main` (standardized build process)
