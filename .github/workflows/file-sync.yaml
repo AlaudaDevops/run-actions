@@ -1,0 +1,366 @@
+name: Sync files to org repositories
+
+on:
+  workflow_dispatch:
+    inputs:
+      config_file:
+        description: "Config file path (relative to repo root)"
+        required: false
+        default: ".github/sync/config/sync-manage-pr-config.yaml"
+        type: string
+      dry_run:
+        description: "Dry run mode (only check, do not create PRs)"
+        required: false
+        default: false
+        type: boolean
+
+jobs:
+  sync-files:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout current repo
+        uses: actions/checkout@v4
+
+      - name: Verify GitHub CLI
+        run: gh --version
+
+      - name: Install yq
+        run: |
+          sudo wget -qO /usr/local/bin/yq https://github.com/mikefarah/yq/releases/download/v4.47.1/yq_linux_amd64
+          sudo chmod +x /usr/local/bin/yq
+          echo "✅ yq installed: $(yq --version)"
+
+      - name: Auth with GH CLI
+        run: |
+          echo -n "${{ secrets.TOKEN }}" | gh auth login --with-token
+
+      - name: Load sync configuration
+        id: load-config
+        run: |
+          CONFIG_FILE="${{ inputs.config_file }}"
+
+          if [ ! -f "$CONFIG_FILE" ]; then
+            echo "❌ Config file $CONFIG_FILE not found"
+            exit 1
+          fi
+
+          # Validate YAML
+          if [[ "$CONFIG_FILE" == *.yaml ]]; then
+            if ! yq eval . "$CONFIG_FILE" > /dev/null 2>&1; then
+              echo "❌ Invalid YAML in config file $CONFIG_FILE"
+              exit 1
+            fi
+          else
+            echo "❌ Config file must have .yaml extension"
+            exit 1
+          fi
+
+          echo "✅ Config file loaded: $CONFIG_FILE"
+          cat "$CONFIG_FILE"
+
+      - name: List target repositories
+        id: list-repos
+        run: |
+          CONFIG_FILE="${{ inputs.config_file }}"
+
+          # Get all repositories in organization first
+          echo "📋 Getting all repositories in organization"
+          # Get organization name from config
+          ORG_NAME=$(yq eval '.org_name' "$CONFIG_FILE")
+          if [ "$ORG_NAME" = "null" ] || [ -z "$ORG_NAME" ]; then
+            echo "❌ org_name must be specified in config file"
+            exit 1
+          fi
+
+          # Check if we should skip public repos from config
+          SKIP_PUBLIC=$(yq eval '.skip_public_repos' "$CONFIG_FILE")
+          if [ "$SKIP_PUBLIC" = "null" ] || [ -z "$SKIP_PUBLIC" ]; then
+            SKIP_PUBLIC="false"
+          fi
+          echo "🔍 Skip public repos setting: $SKIP_PUBLIC"
+
+          if [ "$SKIP_PUBLIC" = "true" ]; then
+            echo "🔒 Filtering out public repositories (configured in $CONFIG_FILE)"
+            gh repo list "$ORG_NAME" --limit 1000 --json nameWithOwner,visibility \
+              -q '.[] | select(.visibility != "PUBLIC") | .nameWithOwner' > all_repos.txt
+          else
+            gh repo list "$ORG_NAME" --limit 1000 --json nameWithOwner \
+              -q '.[].nameWithOwner' > all_repos.txt
+          fi
+          echo "✅ Repositories listed, total: $(wc -l < all_repos.txt)"
+
+          # Filter repositories based on config
+          if yq eval '.repositories' "$CONFIG_FILE" | grep -q '\S'; then
+            echo "📋 Filtering repositories using YAML config"
+
+            # Clear target repos file
+            > repos.txt
+
+            # Process each repository pattern from config
+            yq eval '.repositories[]' "$CONFIG_FILE" | while IFS= read -r repo_pattern; do
+              if [[ "$repo_pattern" == regex:* ]]; then
+                # Remove 'regex:' prefix and use as regex pattern
+                pattern="${repo_pattern#regex:}"
+                echo "🔍 Matching repositories with regex: $pattern"
+
+                # Find matching repositories using grep with regex
+                grep -E "^$pattern$" all_repos.txt >> repos.txt || true
+              else
+                # Exact match
+                echo "🎯 Adding exact match: $repo_pattern"
+                echo "$repo_pattern" >> repos.txt
+              fi
+            done
+          else
+            echo "📋 Using all repositories in organization"
+            cp all_repos.txt repos.txt
+          fi
+
+          # Remove duplicates and empty lines
+          sort repos.txt | uniq | grep -v '^$' > repos_final.txt || touch repos_final.txt
+          mv repos_final.txt repos.txt
+
+          echo "Target $(wc -l < repos.txt) repositories:"
+          cat repos.txt
+
+      - name: Get target branches
+        id: get-branches
+        run: |
+          CONFIG_FILE="${{ inputs.config_file }}"
+          # Get target branches from config, default to "default" if not specified
+          TARGET_BRANCHES=$(yq eval '.target_branches // "default"' "$CONFIG_FILE")
+          echo "📋 Target branches from config: $TARGET_BRANCHES"
+          echo "branches=$TARGET_BRANCHES" >> $GITHUB_OUTPUT
+
+      - name: Clone source repositories
+        id: clone-sources
+        run: |
+          CONFIG_FILE="${{ inputs.config_file }}"
+
+          # Create directory for source repositories
+          mkdir -p source-repos
+
+          # Track unique source repositories to avoid duplicate clones
+          declare -A cloned_repos
+
+          # Parse all files and identify unique source repositories
+          file_count=$(yq eval '.files | length' "$CONFIG_FILE")
+          for ((i=0; i<file_count; i++)); do
+            source_repo=$(yq eval ".files[$i].source_repo // \"current\"" "$CONFIG_FILE")
+            source_branch=$(yq eval ".files[$i].source_branch // \"main\"" "$CONFIG_FILE")
+
+            if [ "$source_repo" != "current" ]; then
+              repo_key="${source_repo}_${source_branch}"
+              if [[ ! ${cloned_repos[$repo_key]+_} ]]; then
+                echo "🔄 Cloning source repository: $source_repo (branch: $source_branch)"
+                clone_dir="source-repos/$(echo "$source_repo" | sed 's/\//_/g')_${source_branch}"
+                git clone --quiet --depth 1 --branch "$source_branch" "https://x-access-token:${{ secrets.TOKEN }}@github.com/$source_repo.git" "$clone_dir"
+                cloned_repos[$repo_key]="$clone_dir"
+                echo "✅ Cloned $source_repo:$source_branch to $clone_dir"
+              else
+                echo "⚡ Repository $source_repo:$source_branch already cloned"
+              fi
+            fi
+          done
+
+          echo "source_repos_cloned=true" >> $GITHUB_OUTPUT
+
+      - name: Sync files to repositories
+        run: |
+          CONFIG_FILE="${{ inputs.config_file }}"
+          TARGET_BRANCHES="${{ steps.get-branches.outputs.branches }}"
+          DRY_RUN="${{ inputs.dry_run }}"
+
+          # Parse file mappings from config using yq
+
+          while read -r repo; do
+            [ -z "$repo" ] && continue
+            echo "🔎 Processing repository: $repo"
+
+            # Get all branches for this repo
+            all_branches=$(gh api "repos/$repo/branches" --jq '.[].name' | tr '\n' ' ')
+            default_branch=$(gh repo view "$repo" --json defaultBranchRef -q '.defaultBranchRef.name')
+
+            echo "📋 Available branches in $repo: $all_branches"
+            echo "🌟 Default branch: $default_branch"
+
+            # Determine target branches for this repo
+            if [ "$TARGET_BRANCHES" = "default" ]; then
+              target_branches="$default_branch"
+            else
+              target_branches=""
+              IFS=',' read -ra BRANCH_PATTERNS <<< "$TARGET_BRANCHES"
+              for pattern in "${BRANCH_PATTERNS[@]}"; do
+                pattern=$(echo "$pattern" | xargs) # trim whitespace
+                echo "🔍 Checking pattern: '$pattern'"
+                if [[ "$pattern" == *"*"* ]]; then
+                  # Pattern matching
+                  echo "🔧 Using wildcard matching for: '$pattern'"
+                  for branch in $all_branches; do
+                    if [[ "$branch" == $pattern ]]; then
+                      echo "✅ Branch '$branch' matches pattern '$pattern'"
+                      target_branches="$target_branches $branch"
+                    fi
+                  done
+                else
+                  # Check if pattern is 'default' - use repo's default branch
+                  if [[ "$pattern" == "default" ]]; then
+                    echo "🔧 Using default branch for: '$pattern' -> '$default_branch'"
+                    target_branches="$target_branches $default_branch"
+                  else
+                    # Exact match
+                    echo "🔧 Using exact matching for: '$pattern'"
+                    found=false
+                    for branch in $all_branches; do
+                      if [[ "$branch" == "$pattern" ]]; then
+                        echo "✅ Branch '$pattern' found in repository"
+                        target_branches="$target_branches $branch"
+                        found=true
+                        break
+                      fi
+                    done
+                    if [ "$found" = false ]; then
+                      echo "❌ Branch '$pattern' not found in repository"
+                    fi
+                  fi
+                fi
+              done
+            fi
+
+            echo "Target branches for $repo: $target_branches"
+
+            # Process each target branch
+            for branch in $target_branches; do
+              [ -z "$branch" ] && continue
+              echo "📝 Processing branch: $branch in $repo"
+
+              needs_pr=false
+
+              # Check each file from config
+              file_count=$(yq eval '.files | length' "$CONFIG_FILE")
+              for ((i=0; i<file_count; i++)); do
+                source_path=$(yq eval ".files[$i].source" "$CONFIG_FILE")
+                target_path=$(yq eval ".files[$i].target" "$CONFIG_FILE")
+                source_repo=$(yq eval ".files[$i].source_repo // \"current\"" "$CONFIG_FILE")
+                source_branch=$(yq eval ".files[$i].source_branch // \"main\"" "$CONFIG_FILE")
+
+                # Determine actual source file path
+                if [ "$source_repo" = "current" ]; then
+                  actual_source_path="$source_path"
+                else
+                  clone_dir="source-repos/$(echo "$source_repo" | sed 's/\//_/g')_${source_branch}"
+                  actual_source_path="$clone_dir/$source_path"
+                fi
+
+                if [ ! -f "$actual_source_path" ]; then
+                  echo "⚠️ Source file $actual_source_path not found (repo: $source_repo, branch: $source_branch), skipping"
+                  continue
+                fi
+
+                # Check if file exists in target repo
+                if gh api "repos/$repo/contents/$target_path?ref=$branch" >/dev/null 2>&1; then
+                  # File exists, check if content differs
+                  remote_content=$(gh api "repos/$repo/contents/$target_path?ref=$branch" --jq '.content' | base64 -d)
+                  local_content=$(cat "$actual_source_path")
+
+                  if [ "$remote_content" != "$local_content" ]; then
+                    echo "🔄 File $target_path differs in $repo:$branch (source: $source_repo:$source_branch)"
+                    needs_pr=true
+                  else
+                    echo "✅ File $target_path is up to date in $repo:$branch"
+                  fi
+                else
+                  echo "➕ File $target_path missing in $repo:$branch (source: $source_repo:$source_branch)"
+                  needs_pr=true
+                fi
+              done
+
+              # Create PR if needed and not in dry-run mode
+              if [ "$needs_pr" = "true" ] && [ "$DRY_RUN" != "true" ]; then
+                echo "🚀 Creating PR for $repo:$branch"
+
+                tmpdir=$(mktemp -d)
+                git clone --quiet --depth 1 --branch "$branch" "https://x-access-token:${{ secrets.TOKEN }}@github.com/$repo.git" "$tmpdir"
+
+                cd "$tmpdir" || exit
+                git checkout -b "sync-files-$(date +%Y%m%d-%H%M%S)"
+
+                # Copy files
+                file_count=$(yq eval '.files | length' "$GITHUB_WORKSPACE/$CONFIG_FILE")
+                for ((j=0; j<file_count; j++)); do
+                  source_path=$(yq eval ".files[$j].source" "$GITHUB_WORKSPACE/$CONFIG_FILE")
+                  target_path=$(yq eval ".files[$j].target" "$GITHUB_WORKSPACE/$CONFIG_FILE")
+                  source_repo=$(yq eval ".files[$j].source_repo // \"current\"" "$GITHUB_WORKSPACE/$CONFIG_FILE")
+                  source_branch=$(yq eval ".files[$j].source_branch // \"main\"" "$GITHUB_WORKSPACE/$CONFIG_FILE")
+
+                  # Determine actual source file path
+                  if [ "$source_repo" = "current" ]; then
+                    actual_source_path="$GITHUB_WORKSPACE/$source_path"
+                  else
+                    clone_dir="$GITHUB_WORKSPACE/source-repos/$(echo "$source_repo" | sed 's/\//_/g')_${source_branch}"
+                    actual_source_path="$clone_dir/$source_path"
+                  fi
+
+                  if [ -f "$actual_source_path" ]; then
+                    mkdir -p "$(dirname "$target_path")"
+                    cp "$actual_source_path" "$target_path"
+                    git add "$target_path"
+                    echo "📄 Copied $actual_source_path -> $target_path"
+                  else
+                    echo "⚠️ Source file $actual_source_path not found during copy, skipping"
+                  fi
+                done
+
+                if git diff --staged --quiet; then
+                  echo "ℹ️ No changes to commit for $repo:$branch"
+                else
+                  # Generate file list for commit message
+                  files_list=""
+                  file_count=$(yq eval '.files | length' "$GITHUB_WORKSPACE/$CONFIG_FILE")
+                  for ((k=0; k<file_count; k++)); do
+                    target_file=$(yq eval ".files[$k].target" "$GITHUB_WORKSPACE/$CONFIG_FILE")
+                    files_list="$files_list- $target_file\n"
+                  done
+
+                  git -c user.name="github-actions[bot]" -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
+                    commit -m "$(cat <<EOF
+          chore: sync files from central repository
+
+          Files synced:
+            $(echo -e "$files_list")
+
+          Auto-generated by sync workflow
+          EOF
+                    )"
+
+                  git push origin HEAD
+
+                  # Get PR title from config or use default
+                  pr_title=$(yq eval '.pr_title // "chore: sync files to branch"' "$GITHUB_WORKSPACE/$CONFIG_FILE")
+
+                  gh pr create --repo "$repo" \
+                    --title "$pr_title \`$branch\`" \
+                    --base "$branch" \
+                    --head "$(git branch --show-current)" \
+                    --body "$(cat <<EOF
+          This PR syncs files from the central repository to ensure consistency across the organization.
+
+          **Files synced:**
+          $(echo -e "$files_list")
+
+          **Target branch:** \`$branch\`
+
+          This is an automated PR created by the file sync workflow.
+          EOF
+                    )"
+
+                  echo "✔️ PR created for $repo:$branch"
+                fi
+
+                cd - >/dev/null || exit
+                rm -rf "$tmpdir"
+              elif [ "$DRY_RUN" = "true" ] && [ "$needs_pr" = "true" ]; then
+                echo "🔍 [DRY RUN] Would create PR for $repo:$branch"
+              fi
+            done
+          done < repos.txt
