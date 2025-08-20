@@ -36,10 +36,10 @@ repositories:
 # Files to sync - array of file mappings
 files:
   # Basic file sync example
-  - source: "base.mk"
+  - source: "tektoncd/base.mk"
     target: "base.mk"
     # Optional: description of what this file is for
     description: "makefile base configuration for Tekton projects"
     # Optional: source repository (defaults to current repository if not specified)
-    source_repo: "AlaudaDevops/tektoncd-operator"
+    source_repo: "AlaudaDevops/hack"
     source_branch: "main"

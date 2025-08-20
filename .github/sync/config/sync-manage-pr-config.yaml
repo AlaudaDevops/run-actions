@@ -40,3 +40,6 @@ files:
     target: ".tekton/pr-manage.yaml"
     # Optional: description of what this file is for
     description: "pr-manage pac pipeline configuration"
+    # Optional: source repository (defaults to current repository if not specified)
+    source_repo: "AlaudaDevops/hack"
+    source_branch: "main"
