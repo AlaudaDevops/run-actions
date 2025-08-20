@@ -310,12 +310,24 @@ jobs:
                   # Get PR title from config or use default
                   pr_title=$(yq eval '.pr_title // "chore: sync files to branch"' "$GITHUB_WORKSPACE/$CONFIG_FILE")
 
-                  # Generate file list for commit message
+                  # Generate file list for commit message and PR body
                   files_list=""
+                  pr_files_detail=""
                   file_count=$(yq eval '.files | length' "$GITHUB_WORKSPACE/$CONFIG_FILE")
                   for ((k=0; k<file_count; k++)); do
                     target_file=$(yq eval ".files[$k].target" "$GITHUB_WORKSPACE/$CONFIG_FILE")
+                    source_file=$(yq eval ".files[$k].source" "$GITHUB_WORKSPACE/$CONFIG_FILE")
+                    source_repo_detail=$(yq eval ".files[$k].source_repo // \"current\"" "$GITHUB_WORKSPACE/$CONFIG_FILE")
+                    source_branch_detail=$(yq eval ".files[$k].source_branch // \"main\"" "$GITHUB_WORKSPACE/$CONFIG_FILE")
+
+                    # Replace "current" with actual repo name
+                    if [ "$source_repo_detail" = "current" ]; then
+                      source_repo_detail="${{ github.repository }}"
+                      source_branch_detail="${{ github.ref_name }}"
+                    fi
+
                     files_list="$files_list- $target_file\n"
+                    pr_files_detail="$pr_files_detail- \`$target_file\` ← \`$source_file\` from [\`$source_repo_detail\`](https://github.com/$source_repo_detail/blob/$source_branch_detail/$source_file)\n"
                   done
 
                   git -c user.name="github-actions[bot]" -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
@@ -338,12 +350,21 @@ jobs:
                     --body "$(cat <<EOF
           This PR syncs files from the central repository to ensure consistency across the organization.
 
-          **Files synced:**
-          $(echo -e "$files_list")
+          ## 📄 Files synchronized:
+          $(echo -e "$pr_files_detail")
 
-          **Target branch:** \`$branch\`
+          ## 🎯 Target information:
+          - **Repository:** \`$repo\`
+          - **Target branch:** \`$branch\`
+          - **Workflow run:** [\`${{ github.repository }}\` #\`${{ github.run_number }}\`](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})
 
-          This is an automated PR created by the file sync workflow.
+          ## ⚙️ Sync configuration:
+          - **Config file:** \`${{ inputs.config_file }}\`
+          - **Triggered by:** @${{ github.actor }}
+          - **Run ID:** \`${{ github.run_id }}\`
+
+          ---
+          🤖 This is an automated PR created by the [file sync workflow](https://github.com/${{ github.repository }}/blob/${{ github.ref_name }}/.github/workflows/file-sync.yaml).
           EOF
                     )"
 
