@@ -201,15 +201,19 @@ jobs:
                 else
                   # Use grep extended regex for all pattern matching
                   echo "🔧 Using grep regex matching for: '$pattern'"
-                  echo "$all_branches" | tr ' ' '\n' | grep -E "^${pattern}$" | while read -r matched_branch; do
-                    if [ -n "$matched_branch" ]; then
-                      echo "✅ Branch '$matched_branch' matches regex pattern '$pattern'"
-                      target_branches="$target_branches $matched_branch"
-                    fi
-                  done
+                  matched_branches=$(echo "$all_branches" | tr ' ' '\n' | grep -E "^${pattern}$" || true)
 
-                  # Check if any matches were found
-                  if ! echo "$all_branches" | tr ' ' '\n' | grep -qE "^${pattern}$"; then
+                  if [ -n "$matched_branches" ]; then
+                    while IFS= read -r matched_branch; do
+                      if [ -n "$matched_branch" ]; then
+                        echo "✅ Branch '$matched_branch' matches regex pattern '$pattern'"
+                        target_branches="$target_branches $matched_branch"
+                      fi
+                    done <<< "$matched_branches"
+                  fi
+
+                  # Check if no matches were found
+                  if [ -z "$matched_branches" ]; then
                     echo "❌ No branches match regex pattern '$pattern'"
                   fi
                 fi
@@ -303,6 +307,9 @@ jobs:
                 if git diff --staged --quiet; then
                   echo "ℹ️ No changes to commit for $repo:$branch"
                 else
+                  # Get PR title from config or use default
+                  pr_title=$(yq eval '.pr_title // "chore: sync files to branch"' "$GITHUB_WORKSPACE/$CONFIG_FILE")
+
                   # Generate file list for commit message
                   files_list=""
                   file_count=$(yq eval '.files | length' "$GITHUB_WORKSPACE/$CONFIG_FILE")
@@ -313,7 +320,7 @@ jobs:
 
                   git -c user.name="github-actions[bot]" -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
                     commit -m "$(cat <<EOF
-          chore: sync files from central repository
+          $pr_title \`$branch\`
 
           Files synced:
             $(echo -e "$files_list")
@@ -323,9 +330,6 @@ jobs:
                     )"
 
                   git push origin HEAD
-
-                  # Get PR title from config or use default
-                  pr_title=$(yq eval '.pr_title // "chore: sync files to branch"' "$GITHUB_WORKSPACE/$CONFIG_FILE")
 
                   gh pr create --repo "$repo" \
                     --title "$pr_title \`$branch\`" \
