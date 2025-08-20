@@ -1,0 +1,42 @@
+# File Sync Configuration
+# This configuration file defines which files to sync to which repositories and branches
+
+# Organization name (required)
+# The GitHub organization to sync files to
+org_name: "AlaudaDevops"
+
+# Pull Request Title format (optional)
+# The PR title will be: "<pr_title> `<branch_name>`"
+# If not specified, defaults to "chore: sync files to branch"
+pr_title: "chore: sync pr-manage pac pipeline to"
+
+# Target branches (optional)
+# Comma-separated list of branch names or patterns (e.g., "main,release-*")
+# If not specified, defaults to "default" (uses each repository's default branch)
+target_branches: "default,release-*"
+
+# Skip public repositories (optional)
+# If true, only private and internal repositories will be processed
+# If not specified, defaults to false (includes all repositories)
+skip_public_repos: true
+
+# Target repositories (optional)
+# If not specified, will target all repositories in the organization
+repositories:
+  # Exact repository matches
+  - "AlaudaDevops/tektoncd-operator"
+
+  # Regular expression patterns (prefix with 'regex:')
+  # Use grep patterns regex syntax for matching
+  - "regex:AlaudaDevops/.*"
+
+  # More complex regex examples
+  # - "regex:AlaudaDevops/[a-zA-Z-_]+-v[0-9]+\\.[0-9]+"  # Version tagged repos like 'project-v1.0'
+
+# Files to sync - array of file mappings
+files:
+  # Basic file sync example
+  - source: ".tekton/pr-manage.yaml"
+    target: ".tekton/pr-manage.yaml"
+    # Optional: description of what this file is for
+    description: "pr-manage pac pipeline configuration"
