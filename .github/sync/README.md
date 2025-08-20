@@ -297,30 +297,35 @@ repositories:
 
 ## Best Practices
 
-1. **Test First**: Use dry run mode to test configuration before actual sync
-2. **Progressive Deployment**: Test on a few repositories first, then expand to full organization
-3. **File Management**: Keep template files organized in the source locations specified in config
-4. **Minimal Permissions**: Only give tokens necessary permissions for target repositories
-5. **Configuration Validation**: Ensure YAML syntax is correct before running workflow
+1. **Use Centralized Template Repositories**: Store template files in dedicated repositories (e.g., `org-templates`, `workflow-templates`) rather than current repository
+2. **Test First**: Use dry run mode to test configuration before actual sync
+3. **Progressive Deployment**: Test on a few repositories first, then expand to full organization
+4. **Template Organization**: Keep template files well organized in source repositories with clear directory structures
+5. **Version Control**: Use specific branches or tags in source repositories for stable templates
+6. **Minimal Permissions**: Give tokens necessary permissions for both target and source repositories
+7. **Configuration Validation**: Ensure YAML syntax is correct before running workflow
 
 ## Example Scenarios
 
-### Sync Security Policy to All Repositories (Current Repository)
-- Config: All repositories' default branches
-- Files: `SECURITY.md`, `CODE_OF_CONDUCT.md` from current repository
+### Sync Organization Templates to All Repositories
+- Config: All repositories' default branches  
+- Files: `SECURITY.md`, `CODE_OF_CONDUCT.md` from `AlaudaDevops/org-templates`
+- Purpose: Ensure consistent governance files across the organization
 
-### Update CI Configuration to Release Branches (External Repository)
+### Update CI Configuration to Release Branches  
 - Config: `release-*` branch pattern
-- Files: `.github/workflows/ci.yml` from `AlaudaDevops/workflow-templates`
-- Files: `.github/dependabot.yml` from `AlaudaDevops/config-templates`
+- Files: `.github/workflows/ci.yml` from `AlaudaDevops/workflow-templates:v2.0`
+- Files: `.github/dependabot.yml` from `AlaudaDevops/config-templates:main`
+- Purpose: Standardize CI/CD processes across release branches
 
-### Sync Build Configuration from Centralized Templates
+### Sync Build Tools from Centralized Templates  
 - Config: All service repositories (`regex:AlaudaDevops/service-.*`)
 - Files: `Makefile`, `scripts/build.sh`, `scripts/test.sh` from `AlaudaDevops/build-templates:main`
 - Files: `Dockerfile` from `AlaudaDevops/docker-templates:v2.0`
+- Purpose: Standardize build processes across all services
 
-### Mix Current and External Repository Files
-- Config: All repositories' default branches
-- Files: `SECURITY.md` from current repository (organization-specific policy)
-- Files: `.github/workflows/ci.yml` from `AlaudaDevops/workflow-templates:main` (standardized CI)
-- Files: `Makefile` from `AlaudaDevops/build-templates:main` (standardized build process)
+### Sync Tekton Pipelines from Pipeline Repository
+- Config: All repositories with tekton support
+- Files: `pr-manage.yaml`, `build-pipeline.yaml` from `AlaudaDevops/tekton-templates:main`
+- Target: `.tekton/` directory in target repositories
+- Purpose: Maintain consistent CI pipelines across all projects

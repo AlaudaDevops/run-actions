@@ -13,7 +13,7 @@ pr_title: "chore: sync pr-manage pac pipeline to"
 # Target branches (optional)
 # Comma-separated list of branch names or patterns (e.g., "main,release-*")
 # If not specified, defaults to "default" (uses each repository's default branch)
-target_branches: "default,release-*"
+target_branches: "default,release-[v]?[0-9]+\\.[0-9]+(\\.[0-9]+)?"
 
 # Skip public repositories (optional)
 # If true, only private and internal repositories will be processed
