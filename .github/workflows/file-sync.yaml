@@ -175,7 +175,10 @@ jobs:
 
           while read -r repo; do
             [ -z "$repo" ] && continue
-            echo "🔎 Processing repository: $repo"
+            echo ""
+            echo "═══════════════════════════════════════════════════════════════"
+            echo "🏛️  Processing repository: $repo"
+            echo "═══════════════════════════════════════════════════════════════"
 
             # Get all branches for this repo
             all_branches=$(gh api "repos/$repo/branches" --jq '.[].name' | tr '\n' ' ')
@@ -192,7 +195,6 @@ jobs:
               IFS=',' read -ra BRANCH_PATTERNS <<< "$TARGET_BRANCHES"
               for pattern in "${BRANCH_PATTERNS[@]}"; do
                 pattern=$(echo "$pattern" | xargs) # trim whitespace
-                echo "🔍 Checking pattern: '$pattern'"
 
                 # Check if pattern is 'default' - use repo's default branch
                 if [[ "$pattern" == "default" ]]; then
@@ -214,7 +216,7 @@ jobs:
 
                   # Check if no matches were found
                   if [ -z "$matched_branches" ]; then
-                    echo "❌ No branches match regex pattern '$pattern'"
+                    echo "ℹ️ No branches match regex pattern '$pattern'"
                   fi
                 fi
               done
@@ -268,17 +270,114 @@ jobs:
                 fi
               done
 
-              # Create PR if needed and not in dry-run mode
-              if [ "$needs_pr" = "true" ] && [ "$DRY_RUN" != "true" ]; then
-                echo "🚀 Creating PR for $repo:$branch"
+              # If no files need updating, skip PR creation
+              if [ "$needs_pr" = "false" ]; then
+                continue
+              fi
 
-                tmpdir=$(mktemp -d)
-                git clone --quiet --depth 1 --branch "$branch" "https://x-access-token:${{ secrets.TOKEN }}@github.com/$repo.git" "$tmpdir"
+              # Create PR
 
-                cd "$tmpdir" || exit
-                git checkout -b "sync-files-$(date +%Y%m%d-%H%M%S)"
+              # Get PR title from config
+              pr_title=$(yq eval '.pr_title // "chore: sync files to branch"' "$CONFIG_FILE")
+              expected_pr_title="$pr_title \`$branch\`"
 
-                # Copy files
+              # Check for existing PR with exact same title
+              existing_pr=$(gh pr list --repo "$repo" --base "$branch" --state open --search "$pr_title" --json number,headRefName,title | jq --arg title "$expected_pr_title" 'map(select(.title == $title)) | .[0] // empty')
+              pr_exists=$(echo "$existing_pr" | jq -r 'if . == null or . == "" then "0" else "1" end' 2>/dev/null || echo "0")
+              pr_needs_update=true
+              pr_number=""
+
+              if [ "$pr_exists" = "1" ]; then
+                pr_number=$(echo "$existing_pr" | jq -r '.number')
+                pr_branch=$(echo "$existing_pr" | jq -r '.headRefName')
+
+                # Check if PR content needs updating by comparing files
+                echo "🔍 Checking if PR #$pr_number content needs updating..."
+
+                # Assume PR is up to date unless we find differences
+                pr_needs_update=false
+
+                # Check each file to see if it differs from what's in the PR branch
+                file_count=$(yq eval '.files | length' "$CONFIG_FILE")
+                for ((k=0; k<file_count; k++)); do
+                  source_path=$(yq eval ".files[$k].source" "$CONFIG_FILE")
+                  target_path=$(yq eval ".files[$k].target" "$CONFIG_FILE")
+                  source_repo=$(yq eval ".files[$k].source_repo // \"current\"" "$CONFIG_FILE")
+                  source_branch_check=$(yq eval ".files[$k].source_branch // \"main\"" "$CONFIG_FILE")
+
+                  echo "  🔎 Comparing $target_path..."
+
+                  # Get current source content
+                  if [ "$source_repo" = "current" ]; then
+                    current_source_path="$source_path"
+                  else
+                    clone_dir="source-repos/$(echo "$source_repo" | sed 's/\//_/g')_${source_branch_check}"
+                    current_source_path="$clone_dir/$source_path"
+                  fi
+
+                  if [ -f "$current_source_path" ]; then
+                    current_content=$(cat "$current_source_path")
+
+                    # Get content from PR branch with better error handling
+                    if pr_content=$(gh api "repos/$repo/contents/$target_path?ref=$pr_branch" --jq '.content' 2>/dev/null | base64 -d 2>/dev/null); then
+                      if [ "$current_content" != "$pr_content" ]; then
+                        echo "    📝 Content differs"
+                        pr_needs_update=true
+                        break
+                      else
+                        echo "    ✅ Content identical"
+                      fi
+                    else
+                      echo "    📝 File missing in PR branch"
+                      pr_needs_update=true
+                      break
+                    fi
+                  else
+                    echo "    ⚠️ Source file not found: $current_source_path"
+                    pr_needs_update=true
+                    break
+                  fi
+                done
+
+                if [ "$pr_needs_update" = "false" ]; then
+                  echo "ℹ️ PR #$pr_number content is already up to date for $repo:$branch"
+                elif [ "$DRY_RUN" = "true" ]; then
+                  echo "🟡 [DRY RUN] Would update existing PR #$pr_number for $repo:$branch"
+                else
+                  echo "🔄 Found existing PR #$pr_number with same title, updating content for $repo:$branch"
+
+                  tmpdir=$(mktemp -d)
+                  git clone --quiet --depth 1 --branch "$branch" "https://x-access-token:${{ secrets.TOKEN }}@github.com/$repo.git" "$tmpdir"
+
+                  cd "$tmpdir" || exit
+
+                  # Fetch and checkout the existing PR branch
+                  git fetch origin "$pr_branch"
+                  git checkout "$pr_branch"
+
+                  # Reset to base branch to get clean state
+                  git reset --hard "origin/$branch"
+                fi
+              else
+                # No existing PR, so we need to create one (pr_needs_update already true)
+                if [ "$DRY_RUN" = "true" ]; then
+                  echo "🟡 [DRY RUN] Would create new PR for $repo:$branch"
+                else
+                  echo "🚀 Creating new PR for $repo:$branch"
+
+                  tmpdir=$(mktemp -d)
+                  git clone --quiet --depth 1 --branch "$branch" "https://x-access-token:${{ secrets.TOKEN }}@github.com/$repo.git" "$tmpdir"
+
+                  cd "$tmpdir" || exit
+
+                  # Use consistent branch naming
+                  sync_branch="sync-files-$(echo "$branch" | sed 's/[^a-zA-Z0-9._-]/-/g')"
+                  git checkout -b "$sync_branch"
+                fi
+              fi
+
+              # Copy files (skip in dry run mode or if PR doesn't need update)
+              if [ "$DRY_RUN" != "true" ] && [ "$pr_needs_update" = "true" ]; then
                 file_count=$(yq eval '.files | length' "$GITHUB_WORKSPACE/$CONFIG_FILE")
                 for ((j=0; j<file_count; j++)); do
                   source_path=$(yq eval ".files[$j].source" "$GITHUB_WORKSPACE/$CONFIG_FILE")
@@ -304,34 +403,34 @@ jobs:
                   fi
                 done
 
-                if git diff --staged --quiet; then
-                  echo "ℹ️ No changes to commit for $repo:$branch"
-                else
-                  # Get PR title from config or use default
-                  pr_title=$(yq eval '.pr_title // "chore: sync files to branch"' "$GITHUB_WORKSPACE/$CONFIG_FILE")
+              if git diff --staged --quiet; then
+                echo "ℹ️ No changes to commit for $repo:$branch"
+              else
+                # Get PR title from config or use default
+                pr_title=$(yq eval '.pr_title // "chore: sync files to branch"' "$GITHUB_WORKSPACE/$CONFIG_FILE")
 
-                  # Generate file list for commit message and PR body
-                  files_list=""
-                  pr_files_detail=""
-                  file_count=$(yq eval '.files | length' "$GITHUB_WORKSPACE/$CONFIG_FILE")
-                  for ((k=0; k<file_count; k++)); do
-                    target_file=$(yq eval ".files[$k].target" "$GITHUB_WORKSPACE/$CONFIG_FILE")
-                    source_file=$(yq eval ".files[$k].source" "$GITHUB_WORKSPACE/$CONFIG_FILE")
-                    source_repo_detail=$(yq eval ".files[$k].source_repo // \"current\"" "$GITHUB_WORKSPACE/$CONFIG_FILE")
-                    source_branch_detail=$(yq eval ".files[$k].source_branch // \"main\"" "$GITHUB_WORKSPACE/$CONFIG_FILE")
+                # Generate file list for commit message and PR body
+                files_list=""
+                pr_files_detail=""
+                file_count=$(yq eval '.files | length' "$GITHUB_WORKSPACE/$CONFIG_FILE")
+                for ((k=0; k<file_count; k++)); do
+                  target_file=$(yq eval ".files[$k].target" "$GITHUB_WORKSPACE/$CONFIG_FILE")
+                  source_file=$(yq eval ".files[$k].source" "$GITHUB_WORKSPACE/$CONFIG_FILE")
+                  source_repo_detail=$(yq eval ".files[$k].source_repo // \"current\"" "$GITHUB_WORKSPACE/$CONFIG_FILE")
+                  source_branch_detail=$(yq eval ".files[$k].source_branch // \"main\"" "$GITHUB_WORKSPACE/$CONFIG_FILE")
 
-                    # Replace "current" with actual repo name
-                    if [ "$source_repo_detail" = "current" ]; then
-                      source_repo_detail="${{ github.repository }}"
-                      source_branch_detail="${{ github.ref_name }}"
-                    fi
+                  # Replace "current" with actual repo name
+                  if [ "$source_repo_detail" = "current" ]; then
+                    source_repo_detail="${{ github.repository }}"
+                    source_branch_detail="${{ github.ref_name }}"
+                  fi
 
-                    files_list="$files_list- $target_file\n"
-                    pr_files_detail="$pr_files_detail- \`$target_file\` ← \`$source_file\` from [\`$source_repo_detail\`](https://github.com/$source_repo_detail/blob/$source_branch_detail/$source_file)\n"
-                  done
+                  files_list="$files_list- $target_file\n"
+                  pr_files_detail="$pr_files_detail- \`$target_file\` ← \`$source_file\` from [\`$source_repo_detail\`](https://github.com/$source_repo_detail/blob/$source_branch_detail/$source_file)\n"
+                done
 
-                  git -c user.name="github-actions[bot]" -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
-                    commit -m "$(cat <<EOF
+                git -c user.name="github-actions[bot]" -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
+                  commit -m "$(cat <<EOF
           $pr_title \`$branch\`
 
           Files synced:
@@ -339,10 +438,12 @@ jobs:
 
           Auto-generated by sync workflow
           EOF
-                    )"
+                  )"
 
-                  git push origin HEAD
+                git push origin HEAD
 
+                # Create PR only if it's a new branch, otherwise just push updates
+                if [ "$pr_exists" = "0" ]; then
                   gh pr create --repo "$repo" \
                     --title "$pr_title \`$branch\`" \
                     --base "$branch" \
@@ -366,15 +467,15 @@ jobs:
           ---
           🤖 This is an automated PR created by the [file sync workflow](https://github.com/${{ github.repository }}/blob/${{ github.ref_name }}/.github/workflows/file-sync.yaml).
           EOF
-                    )"
+                  )"
 
                   echo "✔️ PR created for $repo:$branch"
+                else
+                  echo "✔️ PR updated for $repo:$branch (PR #$pr_number)"
                 fi
 
                 cd - >/dev/null || exit
                 rm -rf "$tmpdir"
-              elif [ "$DRY_RUN" = "true" ] && [ "$needs_pr" = "true" ]; then
-                echo "🔍 [DRY RUN] Would create PR for $repo:$branch"
               fi
             done
           done < repos.txt
