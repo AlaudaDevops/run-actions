@@ -8,6 +8,11 @@ on:
         required: false
         default: ".github/sync/config/sync-manage-pr-config.yaml"
         type: string
+      repositories:
+        description: "Override repositories from config (comma-separated, supports regex: prefix)"
+        required: false
+        default: "regex:AlaudaDevops/.*"
+        type: string
       dry_run:
         description: "Dry run mode (only check, do not create PRs)"
         required: false
@@ -80,17 +85,42 @@ jobs:
           echo "🔍 Skip public repos setting: $SKIP_PUBLIC"
 
           if [ "$SKIP_PUBLIC" = "true" ]; then
-            echo "🔒 Filtering out public repositories (configured in $CONFIG_FILE)"
-            gh repo list "$ORG_NAME" --limit 1000 --json nameWithOwner,visibility \
-              -q '.[] | select(.visibility != "PUBLIC") | .nameWithOwner' > all_repos.txt
+            echo "🔒 Filtering out public and archived repositories (configured in $CONFIG_FILE)"
+            gh repo list "$ORG_NAME" --limit 1000 --json nameWithOwner,visibility,isArchived \
+              -q '.[] | select(.visibility != "PUBLIC" and .isArchived != true) | .nameWithOwner' > all_repos.txt
           else
-            gh repo list "$ORG_NAME" --limit 1000 --json nameWithOwner \
-              -q '.[].nameWithOwner' > all_repos.txt
+            echo "📋 Filtering out archived repositories"
+            gh repo list "$ORG_NAME" --limit 1000 --json nameWithOwner,isArchived \
+              -q '.[] | select(.isArchived != true) | .nameWithOwner' > all_repos.txt
           fi
           echo "✅ Repositories listed, total: $(wc -l < all_repos.txt)"
 
-          # Filter repositories based on config
-          if yq eval '.repositories' "$CONFIG_FILE" | grep -q '\S'; then
+          # Filter repositories based on input parameter or config
+          OVERRIDE_REPOS="${{ inputs.repositories }}"
+          if [ -n "$OVERRIDE_REPOS" ]; then
+            echo "📋 Using repositories from input parameter (overriding config): $OVERRIDE_REPOS"
+
+            # Clear target repos file
+            > repos.txt
+
+            # Process each repository pattern from input parameter
+            IFS=',' read -ra REPO_PATTERNS <<< "$OVERRIDE_REPOS"
+            for repo_pattern in "${REPO_PATTERNS[@]}"; do
+              repo_pattern=$(echo "$repo_pattern" | xargs) # trim whitespace
+              if [[ "$repo_pattern" == regex:* ]]; then
+                # Remove 'regex:' prefix and use as regex pattern
+                pattern="${repo_pattern#regex:}"
+                echo "🔍 Matching repositories with regex: $pattern"
+
+                # Find matching repositories using grep with regex
+                grep -E "^$pattern$" all_repos.txt >> repos.txt || true
+              else
+                # Exact match
+                echo "🎯 Adding exact match: $repo_pattern"
+                echo "$repo_pattern" >> repos.txt
+              fi
+            done
+          elif yq eval '.repositories' "$CONFIG_FILE" | grep -q '\S'; then
             echo "📋 Filtering repositories using YAML config"
 
             # Clear target repos file
@@ -410,11 +440,12 @@ jobs:
                     cd "$tmpdir" || exit
 
                     # Fetch and checkout the existing PR branch
-                    git fetch origin "$pr_branch"
+                    git fetch origin "$pr_branch:$pr_branch"
                     git checkout "$pr_branch"
 
-                    # Reset to base branch to get clean state
+                    # Reset to base branch to get clean state and preserve branch reference
                     git reset --hard "origin/$branch"
+
                   fi
                 else
                   # No existing PR, so we need to create one (pr_needs_update already true)
@@ -492,7 +523,7 @@ jobs:
                     git -c user.name="github-actions[bot]" -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
                       commit -m "$(generate_commit_message "$pr_title" "$branch" "$files_list")"
 
-                    git push --force-with-lease origin HEAD
+                    git push --force origin HEAD
 
                     # Create PR only if it's a new branch, otherwise just push updates
                     if [ "$pr_exists" -eq 0 ]; then
