@@ -262,8 +262,8 @@ jobs:
             echo "🏛️  Processing repository: $repo ($repos_processed)"
             echo "═══════════════════════════════════════════════════════════════"
 
-            # Get all branches for this repo
-            all_branches=$(gh api "repos/$repo/branches" --jq '.[].name' | tr '\n' ' ')
+            # Get all branches for this repo with pagination support
+            all_branches=$(gh api --paginate "repos/$repo/branches" --jq '.[].name' | tr '\n' ' ')
             default_branch=$(gh repo view "$repo" --json defaultBranchRef -q '.defaultBranchRef.name')
 
             echo "📋 Available branches in $repo: $all_branches"
