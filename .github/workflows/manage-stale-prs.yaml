@@ -1,0 +1,108 @@
+name: Manage Stale Pull Requests
+
+on:
+  schedule:
+    # Run daily at 2 AM UTC
+    - cron: '0 2 * * *'
+  workflow_dispatch:
+    inputs:
+      organization:
+        description: 'GitHub organization to process'
+        required: true
+        default: 'alaudadevops'
+        type: string
+      warning_days:
+        description: 'Days before warning about inactivity'
+        required: false
+        default: '30'
+        type: string
+      close_days:
+        description: 'Days before closing inactive PR'
+        required: false
+        default: '60'
+        type: string
+      delete_days:
+        description: 'Days before deleting stale branch'
+        required: false
+        default: '90'
+        type: string
+      protected_branches_pattern:
+        description: 'Comma-separated list of branch patterns to protect (e.g., main,release-*,alauda-*)'
+        required: false
+        default: 'main,release-*,alauda-*'
+        type: string
+      dry_run:
+        description: 'Dry run - only log actions without executing them'
+        required: false
+        default: false
+        type: boolean
+
+env:
+  # Default values for scheduled runs
+  ORGANIZATION: ${{ github.event.inputs.organization || 'alaudadevops' }}
+  WARNING_DAYS: ${{ github.event.inputs.warning_days || '30' }}
+  CLOSE_DAYS: ${{ github.event.inputs.close_days || '60' }}
+  DELETE_DAYS: ${{ github.event.inputs.delete_days || '90' }}
+  PROTECTED_BRANCHES: ${{ github.event.inputs.protected_branches_pattern || 'main,release-*,alauda-*' }}
+  DRY_RUN: ${{ github.event.inputs.dry_run || 'false' }}
+
+jobs:
+  validate-inputs:
+    runs-on: ubuntu-latest
+    outputs:
+      warning_days: ${{ steps.validate.outputs.warning_days }}
+      close_days: ${{ steps.validate.outputs.close_days }}
+      delete_days: ${{ steps.validate.outputs.delete_days }}
+    steps:
+      - name: Validate input parameters
+        id: validate
+        run: |
+          warning_days=${{ env.WARNING_DAYS }}
+          close_days=${{ env.CLOSE_DAYS }}
+          delete_days=${{ env.DELETE_DAYS }}
+
+          # Validate that close_days > warning_days
+          if [ "$close_days" -le "$warning_days" ]; then
+            echo "❌ Error: close_days ($close_days) must be greater than warning_days ($warning_days)"
+            exit 1
+          fi
+
+          # Validate that delete_days > close_days
+          if [ "$delete_days" -le "$close_days" ]; then
+            echo "❌ Error: delete_days ($delete_days) must be greater than close_days ($close_days)"
+            exit 1
+          fi
+
+          echo "✅ Parameters validated successfully:"
+          echo "  - Warning after: $warning_days days"
+          echo "  - Close after: $close_days days"
+          echo "  - Delete branch after: $delete_days days"
+
+          echo "warning_days=$warning_days" >> $GITHUB_OUTPUT
+          echo "close_days=$close_days" >> $GITHUB_OUTPUT
+          echo "delete_days=$delete_days" >> $GITHUB_OUTPUT
+
+  manage-stale-prs:
+    runs-on: ubuntu-latest
+    needs: validate-inputs
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install GitHub CLI
+        uses: dev-hanz-ops/install-gh-cli-action@v0.2.1
+
+      - name: Authenticate with GitHub CLI
+        run: |
+          echo "${{ secrets.TOKEN }}" | gh auth login --with-token
+
+      - name: Execute stale PR management
+        run: |
+          .github/workflows/scripts/manage_stale_prs.sh \
+            "${{ env.ORGANIZATION }}" \
+            "${{ needs.validate-inputs.outputs.warning_days }}" \
+            "${{ needs.validate-inputs.outputs.close_days }}" \
+            "${{ needs.validate-inputs.outputs.delete_days }}" \
+            "${{ env.PROTECTED_BRANCHES }}" \
+            "${{ env.DRY_RUN }}"
+
