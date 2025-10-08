@@ -35,6 +35,10 @@ jobs:
           token: ${{ secrets.TOKEN }}
       - name: Install GH CLI
         uses: dev-hanz-ops/install-gh-cli-action@v0.2.1
+        with:
+          # current latest
+          # https://github.com/cli/cli/releases/tag/v2.81.0
+          gh-cli-version: 2.81.0
       - name: Run script
         run: |
           echo -n "${{ secrets.TOKEN }}" > secret.token
