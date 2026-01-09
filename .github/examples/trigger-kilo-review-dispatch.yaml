@@ -1,0 +1,96 @@
+# Alternative example: Trigger Kilo PR Review using repository_dispatch
+# This approach allows more flexibility and can be triggered from any script/tool
+# Copy this file to .github/workflows/kilo-review.yaml in your repository
+
+name: Kilo PR Review (Dispatch)
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+  # Also support issue_comment trigger for on-demand reviews
+  issue_comment:
+    types: [created]
+
+jobs:
+  trigger-on-pr:
+    runs-on: ubuntu-latest
+    if: |
+      github.event_name == 'pull_request' &&
+      github.event.pull_request.draft != true &&
+      github.actor != 'dependabot[bot]'
+
+    steps:
+      - name: Trigger Kilo PR Review
+        run: |
+          gh workflow run kilo-pr-review.yaml \
+            --repo alaudadevops/run-actions \
+            --field repository="${{ github.repository }}" \
+            --field pr_number="${{ github.event.pull_request.number }}" \
+            --field model="anthropic/claude-sonnet-4-20250514" \
+            --field review_style="balanced"
+
+          echo "✅ Kilo PR Review triggered for PR #${{ github.event.pull_request.number }}"
+        env:
+          GH_TOKEN: ${{ secrets.RUN_ACTIONS_TOKEN }}
+
+  trigger-on-comment:
+    runs-on: ubuntu-latest
+    if: |
+      github.event_name == 'issue_comment' &&
+      github.event.issue.pull_request &&
+      contains(github.event.comment.body, '/kilo-review')
+
+    steps:
+      - name: React to comment
+        run: |
+          gh api repos/${{ github.repository }}/issues/comments/${{ github.event.comment.id }}/reactions \
+            --method POST \
+            --field content='eyes'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Parse review options from comment
+        id: parse-options
+        run: |
+          COMMENT_BODY="${{ github.event.comment.body }}"
+
+          # Default values
+          MODEL="anthropic/claude-sonnet-4-20250514"
+          STYLE="balanced"
+
+          # Parse --model option
+          if echo "$COMMENT_BODY" | grep -q -- '--model'; then
+            MODEL=$(echo "$COMMENT_BODY" | grep -oP -- '--model\s+\K\S+' || echo "$MODEL")
+          fi
+
+          # Parse --style option
+          if echo "$COMMENT_BODY" | grep -q -- '--style'; then
+            STYLE=$(echo "$COMMENT_BODY" | grep -oP -- '--style\s+\K\S+' || echo "$STYLE")
+          fi
+
+          echo "model=$MODEL" >> $GITHUB_OUTPUT
+          echo "style=$STYLE" >> $GITHUB_OUTPUT
+
+      - name: Trigger Kilo PR Review
+        run: |
+          PR_NUMBER="${{ github.event.issue.number }}"
+
+          gh workflow run kilo-pr-review.yaml \
+            --repo alaudadevops/run-actions \
+            --field repository="${{ github.repository }}" \
+            --field pr_number="$PR_NUMBER" \
+            --field model="${{ steps.parse-options.outputs.model }}" \
+            --field review_style="${{ steps.parse-options.outputs.style }}"
+
+          echo "✅ Kilo PR Review triggered for PR #$PR_NUMBER"
+        env:
+          GH_TOKEN: ${{ secrets.RUN_ACTIONS_TOKEN }}
+
+      - name: Acknowledge trigger
+        run: |
+          gh api repos/${{ github.repository }}/issues/comments/${{ github.event.comment.id }}/reactions \
+            --method POST \
+            --field content='rocket'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

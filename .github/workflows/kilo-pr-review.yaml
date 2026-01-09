@@ -1,0 +1,473 @@
+name: AI PR Review
+
+on:
+  workflow_dispatch:
+    inputs:
+      repository:
+        description: "Repository to review (owner/repo format)"
+        required: true
+        type: string
+      pr_number:
+        description: "Pull request number to review"
+        required: true
+        type: string
+      model:
+        description: "AI model to use for review"
+        required: false
+        default: "mistralai/devstral-2512:free"
+        type: string
+      review_style:
+        description: "Review style (strict, balanced, lenient)"
+        required: false
+        default: "strict"
+        type: string
+      dry_run:
+        description: "Dry run mode (output review but don't post comments)"
+        required: false
+        default: false
+        type: boolean
+
+  workflow_call:
+    inputs:
+      repository:
+        description: "Repository to review (owner/repo format)"
+        required: true
+        type: string
+      pr_number:
+        description: "Pull request number to review"
+        required: true
+        type: string
+      model:
+        description: "AI model to use for review"
+        required: false
+        default: "mistralai/devstral-2512:free"
+        type: string
+      review_style:
+        description: "Review style (strict, balanced, lenient)"
+        required: false
+        default: "strict"
+        type: string
+      dry_run:
+        description: "Dry run mode (output review but don't post comments)"
+        required: false
+        default: false
+        type: boolean
+    secrets:
+      TOKEN:
+        description: "GitHub token with repo access"
+        required: true
+      KILO_API_KEY:
+        description: "API key for the AI provider (e.g., Anthropic API key)"
+        required: true
+      KILO_POST_KEY:
+        description: Second key used in kilocode?
+
+env:
+  REVIEW_COMMENT_MARKER: "<!-- kilo-pr-review-comment -->"
+  SHARED_PROMPT_PATH: ".github/prompts/code-review.md"
+  PERSONALIZED_PROMPT_PATH: ".github/prompts/pr-review.md"
+
+jobs:
+  review-pr:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout run-actions repo (for shared prompt)
+        uses: actions/checkout@v4
+        with:
+          path: run-actions
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+
+
+
+      - name: Install GitHub CLI
+        uses: dev-hanz-ops/install-gh-cli-action@v0.2.1
+        with:
+          # current latest
+          # https://github.com/cli/cli/releases/tag/v2.81.0
+          gh-cli-version: 2.81.0
+
+      - name: Auth with GitHub CLI
+        run: |
+          echo -n "${{ secrets.TOKEN }}" | gh auth login --with-token
+          echo "✅ GitHub CLI authenticated"
+
+      - name: Validate PR exists
+        id: validate-pr
+        run: |
+          REPO="${{ inputs.repository }}"
+          PR_NUMBER="${{ inputs.pr_number }}"
+
+          echo "🔍 Validating PR #$PR_NUMBER in $REPO..."
+
+          # Get PR details
+          PR_DATA=$(gh pr view "$PR_NUMBER" --repo "$REPO" --json number,title,state,headRefName,baseRefName,author,additions,deletions,changedFiles 2>&1) || {
+            echo "❌ Failed to fetch PR #$PR_NUMBER from $REPO"
+            echo "Error: $PR_DATA"
+            exit 1
+          }
+
+          echo "$PR_DATA" | jq .
+
+          # Check if PR is open
+          PR_STATE=$(echo "$PR_DATA" | jq -r '.state')
+          if [ "$PR_STATE" != "OPEN" ]; then
+            echo "⚠️ PR #$PR_NUMBER is not open (state: $PR_STATE). Skipping review."
+            echo "skip=true" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          # Extract PR info for later use
+          echo "pr_title=$(echo "$PR_DATA" | jq -r '.title')" >> $GITHUB_OUTPUT
+          echo "pr_author=$(echo "$PR_DATA" | jq -r '.author.login')" >> $GITHUB_OUTPUT
+          echo "head_branch=$(echo "$PR_DATA" | jq -r '.headRefName')" >> $GITHUB_OUTPUT
+          echo "base_branch=$(echo "$PR_DATA" | jq -r '.baseRefName')" >> $GITHUB_OUTPUT
+          echo "additions=$(echo "$PR_DATA" | jq -r '.additions')" >> $GITHUB_OUTPUT
+          echo "deletions=$(echo "$PR_DATA" | jq -r '.deletions')" >> $GITHUB_OUTPUT
+          echo "changed_files=$(echo "$PR_DATA" | jq -r '.changedFiles')" >> $GITHUB_OUTPUT
+          echo "skip=false" >> $GITHUB_OUTPUT
+
+          echo "✅ PR validated successfully"
+
+      - name: Install Kilo CLI
+        if: steps.validate-pr.outputs.skip != 'true'
+        run: |
+          npm install -g @kilocode/cli
+          echo "✅ Kilo CLI installed: $(kilocode --version || echo 'version check not supported')"
+
+      - name: Clone target repository
+        if: steps.validate-pr.outputs.skip != 'true'
+        run: |
+          REPO="${{ inputs.repository }}"
+          HEAD_BRANCH="${{ steps.validate-pr.outputs.head_branch }}"
+          PR_NUMBER="${{ inputs.pr_number }}"
+
+          echo "📦 Cloning $REPO (branch: $HEAD_BRANCH)..."
+          gh repo clone "$REPO" target-repo
+          cd target-repo
+          gh pr checkout $PR_NUMBER
+          # gh repo clone "$REPO" target-repo -- --branch "$HEAD_BRANCH" --depth 50
+          echo "✅ Repository cloned"
+
+      - name: Get PR diff
+        if: steps.validate-pr.outputs.skip != 'true'
+        id: get-diff
+        run: |
+          REPO="${{ inputs.repository }}"
+          PR_NUMBER="${{ inputs.pr_number }}"
+
+          echo "📄 Fetching PR diff..."
+          gh pr diff "$PR_NUMBER" --repo "$REPO" > pr_diff.patch
+
+          # Get diff stats
+          DIFF_LINES=$(wc -l < pr_diff.patch)
+          echo "📊 Diff size: $DIFF_LINES lines"
+
+          # Check if diff is too large (>10000 lines)
+          if [ "$DIFF_LINES" -gt 10000 ]; then
+            echo "⚠️ Large diff detected ($DIFF_LINES lines). Review may be truncated."
+            echo "large_diff=true" >> $GITHUB_OUTPUT
+          else
+            echo "large_diff=false" >> $GITHUB_OUTPUT
+          fi
+
+          echo "✅ PR diff fetched"
+
+      - name: Load shared prompt
+        if: steps.validate-pr.outputs.skip != 'true'
+        id: shared-prompt
+        run: |
+          PROMPT_FILE="run-actions/${{ env.SHARED_PROMPT_PATH }}"
+
+          if [ -f "$PROMPT_FILE" ]; then
+            echo "✅ Shared prompt loaded from $PROMPT_FILE"
+            cat "$PROMPT_FILE" > shared_prompt.md
+          else
+            echo "⚠️ Shared prompt not found at $PROMPT_FILE, using default"
+            exit 1;
+          fi
+
+      - name: Load personalized prompt (if exists)
+        if: steps.validate-pr.outputs.skip != 'true'
+        id: personalized-prompt
+        run: |
+          PROMPT_FILE="target-repo/${{ env.PERSONALIZED_PROMPT_PATH }}"
+
+          if [ -f "$PROMPT_FILE" ]; then
+            echo "✅ Personalized prompt found at $PROMPT_FILE"
+            cat "$PROMPT_FILE" > personalized_prompt.md
+            echo "has_personalized=true" >> $GITHUB_OUTPUT
+          else
+            echo "ℹ️ No personalized prompt found at $PROMPT_FILE"
+            touch personalized_prompt.md
+            echo "has_personalized=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Prepare review prompt
+        if: steps.validate-pr.outputs.skip != 'true'
+        run: |
+          REPO="${{ inputs.repository }}"
+          PR_NUMBER="${{ inputs.pr_number }}"
+          PR_TITLE="${{ steps.validate-pr.outputs.pr_title }}"
+          PR_AUTHOR="${{ steps.validate-pr.outputs.pr_author }}"
+          HEAD_BRANCH="${{ steps.validate-pr.outputs.head_branch }}"
+          BASE_BRANCH="${{ steps.validate-pr.outputs.base_branch }}"
+          ADDITIONS="${{ steps.validate-pr.outputs.additions }}"
+          DELETIONS="${{ steps.validate-pr.outputs.deletions }}"
+          CHANGED_FILES="${{ steps.validate-pr.outputs.changed_files }}"
+          REVIEW_STYLE="${{ inputs.review_style }}"
+          HAS_PERSONALIZED="${{ steps.personalized-prompt.outputs.has_personalized }}"
+
+          cat > review_prompt.md << EOF
+          # Pull Request Review Task
+
+          ## PR Information
+          - **Repository**: $REPO
+          - **PR Number**: #$PR_NUMBER
+          - **Title**: $PR_TITLE
+          - **Author**: @$PR_AUTHOR
+          - **Branch**: $HEAD_BRANCH → $BASE_BRANCH
+          - **Changes**: +$ADDITIONS/-$DELETIONS in $CHANGED_FILES files
+          - **Review Style**: $REVIEW_STYLE
+
+          ## Shared Review Guidelines
+
+          $(cat shared_prompt.md)
+
+          EOF
+
+          if [ "$HAS_PERSONALIZED" = "true" ]; then
+            cat >> review_prompt.md << EOF
+
+          ## Repository-Specific Guidelines
+
+          $(cat personalized_prompt.md)
+
+          EOF
+          fi
+
+          cat >> review_prompt.md << 'EOF'
+
+          ## Your Task
+
+          1. Review the PR diff below thoroughly
+          2. Identify issues based on the guidelines above
+          3. Provide your review in the specified format
+
+          ## PR Diff
+
+          ```diff
+          EOF
+
+          cat pr_diff.patch >> review_prompt.md
+
+          echo '```' >> review_prompt.md
+
+          echo "✅ Review prompt prepared ($(wc -l < review_prompt.md) lines)"
+          cat review_prompt.md
+          echo "----"
+
+      - name: Configure Kilo CLI
+        if: steps.validate-pr.outputs.skip != 'true'
+        run: |
+          mkdir -p ~/.kilocode/cli
+
+          # Configure Kilo CLI with API key
+          cat > ~/.kilocode/cli/config.json << EOF
+          {
+            "version": "1.0.0",
+            "mode": "code",
+            "telemetry": false,
+            "provider": "default",
+            "providers": [
+              {
+                "id": "default",
+                "provider": "kilocode",
+                "kilocodeToken": "${{ secrets.KILO_API_KEY }}",
+                "kilocodeModel": "${{ inputs.model }}"
+              }
+            ],
+            "autoApproval": {
+              "enabled": true
+            }
+          }
+          EOF
+
+          echo "✅ Kilo CLI configured"
+
+      - name: Run Kilo review
+        if: steps.validate-pr.outputs.skip != 'true'
+        id: kilo-review
+        working-directory: target-repo
+        run: |
+          echo "🤖 Starting Kilo code review..."
+
+
+
+          kilocode --auto --json --timeout 600 "$(cat ../review_prompt.md)" | tee ../review_output.md
+
+          ls -la
+          ls -la ..
+
+          if [ -f "pr-overview.md" ]; then
+            cat pr-overview.md > ../review_output.md
+            echo "✅ Review output saved to ../review_output.md"
+            cat pr-overview.md
+            echo "------------------------"
+          else
+            echo "❌ No review output found"
+          fi
+          if [ -f "pr-comments.json" ]; then
+            cat pr-comments.json > ../review_comments.json
+            echo "✅ Review comments saved to ../review_comments.json"
+            cat pr-comments.json
+            echo "------------------------"
+          else
+            echo "❌ No review comments found"
+          fi
+
+          echo "✅ Kilo review completed"
+          echo "📄 Review output saved ($(wc -l < ../review_output.md) lines)"
+
+      - name: Format review comment
+        # if: steps.validate-pr.outputs.skip != 'true'
+        if: false
+        id: format-comment
+        run: |
+          REPO="${{ inputs.repository }}"
+          PR_NUMBER="${{ inputs.pr_number }}"
+          MODEL="${{ inputs.model }}"
+          REVIEW_STYLE="${{ inputs.review_style }}"
+          HAS_PERSONALIZED="${{ steps.personalized-prompt.outputs.has_personalized }}"
+
+          cat > formatted_review.md << EOF
+          ${{ env.REVIEW_COMMENT_MARKER }}
+
+          ## 🤖 Kilo AI Code Review
+
+          | Property | Value |
+          |----------|-------|
+          | **Model** | \`$MODEL\` |
+          | **Style** | $REVIEW_STYLE |
+          | **Personalized Prompt** | $([ "$HAS_PERSONALIZED" = "true" ] && echo "✅ Yes" || echo "❌ No") |
+          | **Reviewed at** | $(date -u +"%Y-%m-%d %H:%M:%S UTC") |
+
+          ---
+
+          $(cat review_output.md)
+
+          ---
+
+          <details>
+          <summary>ℹ️ About this review</summary>
+
+          This review was automatically generated by [Kilo Code](https://kilo.ai) using the [\`run-actions\`](https://github.com/alaudadevops/run-actions) workflow.
+
+          - **Shared prompt**: [\`${{ env.SHARED_PROMPT_PATH }}\`](https://github.com/alaudadevops/run-actions/blob/main/${{ env.SHARED_PROMPT_PATH }})
+          $([ "$HAS_PERSONALIZED" = "true" ] && echo "- **Repository prompt**: \`${{ env.PERSONALIZED_PROMPT_PATH }}\`" || echo "- *No repository-specific prompt configured*")
+
+          </details>
+          EOF
+
+          echo "✅ Review comment formatted"
+
+      - name: Find existing review comment
+        if: false
+        # if: steps.validate-pr.outputs.skip != 'true' && inputs.dry_run != true
+        id: find-comment
+        run: |
+          REPO="${{ inputs.repository }}"
+          PR_NUMBER="${{ inputs.pr_number }}"
+          MARKER="${{ env.REVIEW_COMMENT_MARKER }}"
+
+          echo "🔍 Looking for existing review comment..."
+
+          # Get all comments on the PR
+          COMMENTS=$(gh api "repos/$REPO/issues/$PR_NUMBER/comments" --paginate 2>/dev/null || echo "[]")
+
+          # Find comment with our marker
+          COMMENT_ID=$(echo "$COMMENTS" | jq -r ".[] | select(.body | contains(\"$MARKER\")) | .id" | head -1)
+
+          if [ -n "$COMMENT_ID" ] && [ "$COMMENT_ID" != "null" ]; then
+            echo "✅ Found existing comment: $COMMENT_ID"
+            echo "comment_id=$COMMENT_ID" >> $GITHUB_OUTPUT
+            echo "has_comment=true" >> $GITHUB_OUTPUT
+          else
+            echo "ℹ️ No existing review comment found"
+            echo "has_comment=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Post or update review comment
+        if: false
+        # if: steps.validate-pr.outputs.skip != 'true' && inputs.dry_run != true
+        run: |
+          REPO="${{ inputs.repository }}"
+          PR_NUMBER="${{ inputs.pr_number }}"
+          HAS_COMMENT="${{ steps.find-comment.outputs.has_comment }}"
+          COMMENT_ID="${{ steps.find-comment.outputs.comment_id }}"
+
+          if [ "$HAS_COMMENT" = "true" ]; then
+            echo "📝 Updating existing comment $COMMENT_ID..."
+            gh api "repos/$REPO/issues/comments/$COMMENT_ID" \
+              --method PATCH \
+              -f body="$(cat formatted_review.md)"
+            echo "✅ Comment updated"
+          else
+            echo "📝 Creating new review comment..."
+            gh pr comment "$PR_NUMBER" --repo "$REPO" --body-file formatted_review.md
+            echo "✅ Comment created"
+          fi
+
+      - name: Submit PR review with inline comments
+        if: false
+        # if: steps.validate-pr.outputs.skip != 'true' && inputs.dry_run != true
+        run: |
+          REPO="${{ inputs.repository }}"
+          PR_NUMBER="${{ inputs.pr_number }}"
+
+          echo "📝 Submitting PR review..."
+
+          # Submit an approval or request changes based on critical issues found
+          # For now, we submit a neutral "COMMENT" review
+          gh pr review "$PR_NUMBER" --repo "$REPO" --comment --body "🤖 Kilo AI has reviewed this PR. See the detailed review comment above."
+
+          echo "✅ PR review submitted"
+
+      - name: Output review (dry run)
+        # if: steps.validate-pr.outputs.skip != 'true' && inputs.dry_run == true
+        if: false
+        run: |
+          echo "🔍 DRY RUN MODE - Review output:"
+          echo "================================"
+          cat formatted_review.md
+          echo "================================"
+          echo "ℹ️ In non-dry-run mode, this would be posted to the PR"
+
+      - name: Generate step summary
+        if: always()
+        run: |
+          REPO="${{ inputs.repository }}"
+          PR_NUMBER="${{ inputs.pr_number }}"
+          SKIP="${{ steps.validate-pr.outputs.skip }}"
+          DRY_RUN="${{ inputs.dry_run }}"
+
+          cat >> $GITHUB_STEP_SUMMARY << EOF
+          # Kilo PR Review Summary
+
+          | Property | Value |
+          |----------|-------|
+          | **Repository** | [$REPO](https://github.com/$REPO) |
+          | **PR** | [#$PR_NUMBER](https://github.com/$REPO/pull/$PR_NUMBER) |
+          | **Status** | $([ "$SKIP" = "true" ] && echo "⏭️ Skipped" || echo "✅ Completed") |
+          | **Mode** | $([ "$DRY_RUN" = "true" ] && echo "🔍 Dry Run" || echo "📝 Live") |
+
+          EOF
+
+          if [ "$SKIP" != "true" ] && [ -f formatted_review.md ]; then
+            echo "## Review Output" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            cat formatted_review.md >> $GITHUB_STEP_SUMMARY
+          fi
