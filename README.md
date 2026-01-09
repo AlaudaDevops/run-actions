@@ -125,6 +125,271 @@ Advanced documentation synchronization between repositories with sophisticated c
 - `.yarn/` - Yarn configuration
 - `doom.config.yml`, `yarn.lock`, `tsconfig.json`, `package.json`, `sites.yaml`
 
+### Kilo PR Review (`kilo-pr-review.yaml`)
+
+AI-powered code review for pull requests using [Kilo Code CLI](https://kilo.ai).
+
+#### Features
+
+- **AI Code Review**: Automated code review using Kilo CLI with configurable AI models
+- **Shared Prompt**: Centralized review guidelines in this repository
+- **Personalized Prompts**: Repository-specific review rules per project
+- **Comment Management**: Creates or updates a single review comment (no spam)
+- **PR Review Submission**: Submits formal GitHub PR review
+- **Dry Run Mode**: Test the review without posting comments
+- **Multiple Review Styles**: Strict, balanced, or lenient review approach
+
+#### Prompts
+
+The review uses a two-tier prompt system:
+
+1. **Shared Prompt** (`.github/prompts/pr-review-shared.md` in this repo):
+   - Common review guidelines for all repositories
+   - Code quality, security, performance, and best practices
+
+2. **Personalized Prompt** (`.github/prompts/pr-review.md` in target repo):
+   - Repository-specific guidelines
+   - Project conventions, tech stack, and custom rules
+   - Optional - falls back to shared prompt only if not present
+
+#### Usage
+
+**Trigger from run-actions repository:**
+```bash
+gh workflow run kilo-pr-review.yaml \
+  --repo alaudadevops/run-actions \
+  -f repository="alaudadevops/my-project" \
+  -f pr_number="123" \
+  -f model="anthropic/claude-sonnet-4-20250514" \
+  -f review_style="balanced" \
+  -f dry_run=false
+```
+
+**Add to your repository:**
+
+Copy the example workflow from `.github/examples/trigger-kilo-review.yaml` to your repository's `.github/workflows/kilo-review.yaml`:
+
+```yaml
+# .github/workflows/kilo-review.yaml
+name: Kilo PR Review
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+jobs:
+  trigger-review:
+    runs-on: ubuntu-latest
+    if: github.event.pull_request.draft != true
+    steps:
+      - name: Trigger Kilo PR Review
+        run: |
+          gh workflow run kilo-pr-review.yaml \
+            --repo alaudadevops/run-actions \
+            --field repository="${{ github.repository }}" \
+            --field pr_number="${{ github.event.pull_request.number }}" \
+            --field model="anthropic/claude-sonnet-4-20250514" \
+            --field review_style="balanced"
+        env:
+          GH_TOKEN: ${{ secrets.RUN_ACTIONS_TOKEN }}
+```
+
+**Add a personalized prompt to your repository:**
+
+Create `.github/prompts/pr-review.md` in your repository with project-specific guidelines. See `.github/examples/pr-review-personalized.md` for a template.
+
+#### Configuration Options
+
+| Parameter | Description | Default |
+|-----------|-------------|---------|
+| `repository` | Target repository (owner/repo) | Required |
+| `pr_number` | Pull request number | Required |
+| `model` | AI model to use | `anthropic/claude-sonnet-4-20250514` |
+| `review_style` | Review strictness (strict/balanced/lenient) | `balanced` |
+| `dry_run` | Test mode without posting comments | `false` |
+
+#### Required Secrets
+
+- `TOKEN`: GitHub token with repo access to target repositories
+- `KILO_API_KEY`: API key for the AI provider (e.g., Anthropic API key)
+- `RUN_ACTIONS_TOKEN` (in your repo): Token to trigger workflows in run-actions
+
+#### On-Demand Review via Comment
+
+Using the alternative workflow (`.github/examples/trigger-kilo-review-dispatch.yaml`), you can trigger reviews by commenting on a PR:
+
+```
+/kilo-review
+/kilo-review --style strict
+/kilo-review --model anthropic/claude-sonnet-4-20250514 --style lenient
+```
+
+## Claude Code Review Skill
+
+A Claude Code skill for performing comprehensive code reviews that outputs structured feedback for GitHub PRs.
+
+### Overview
+
+This skill is designed to be used with [Claude Code](https://github.com/anthropics/claude-code) to review pull requests and generate:
+
+1. **`pr-overview.md`** - A summary comment to post on the PR
+2. **`pr-comments.json`** - Inline review comments in [reviewdog rdjson format](https://github.com/reviewdog/reviewdog/tree/master/proto/rdf)
+
+### Prompt Files
+
+| File | Purpose |
+|------|---------|
+| `.github/prompts/code-review.md` | Main skill prompt with review guidelines and output formats |
+| `.github/prompts/code-review-personalized.example.md` | Template for repository-specific customization |
+
+### Usage with Claude Code
+
+1. **Get the PR diff:**
+```bash
+gh pr diff <PR_NUMBER> > pr-diff.patch
+```
+
+2. **Run the review with Claude Code:**
+```bash
+claude --print "Review this PR diff using the guidelines from .github/prompts/code-review.md:
+
+$(cat pr-diff.patch)"
+```
+
+3. **Post the overview comment:**
+```bash
+gh pr comment <PR_NUMBER> --body-file pr-overview.md
+```
+
+4. **Post inline comments using reviewdog:**
+```bash
+cat pr-comments.json | reviewdog -f=rdjson -reporter=github-pr-review
+```
+
+### Output Formats
+
+#### pr-overview.md
+
+A markdown summary with:
+- Brief assessment of the PR
+- Statistics (critical issues, warnings, suggestions)
+- Categorized list of issues with file:line references
+- Positive feedback on well-written code
+
+#### pr-comments.json
+
+A JSON file in reviewdog rdjson format:
+
+```json
+{
+  "source": {
+    "name": "claude-code-review",
+    "url": "https://github.com/alaudadevops/run-actions"
+  },
+  "diagnostics": [
+    {
+      "message": "Potential SQL injection vulnerability",
+      "location": {
+        "path": "src/db/queries.ts",
+        "range": {
+          "start": { "line": 42, "column": 1 },
+          "end": { "line": 42, "column": 80 }
+        }
+      },
+      "severity": "ERROR",
+      "code": {
+        "value": "security/sql-injection"
+      },
+      "suggestions": [
+        {
+          "text": "const result = await db.query('SELECT * FROM users WHERE id = $1', [userId]);"
+        }
+      ]
+    }
+  ]
+}
+```
+
+### Severity Levels
+
+| Level | Usage |
+|-------|-------|
+| `ERROR` | Critical issues (security, bugs, breaking changes) - must fix before merge |
+| `WARNING` | Should fix but not blocking |
+| `INFO` | Suggestions for improvement |
+| `HINT` | Minor style/convention suggestions |
+
+### Issue Categories
+
+- `security/*` - Security vulnerabilities (xss, sql-injection, secrets)
+- `bug/*` - Potential bugs (null-pointer, race-condition, off-by-one)
+- `performance/*` - Performance issues (n-plus-one, memory-leak)
+- `style/*` - Style issues (naming, formatting)
+- `refactor/*` - Refactoring suggestions (duplication, complexity)
+- `docs/*` - Documentation issues (missing, outdated)
+- `test/*` - Testing issues (missing, coverage)
+
+### Customization
+
+Create `.github/prompts/code-review.md` in your repository (copy from `code-review-personalized.example.md`) to add:
+
+- Project-specific tech stack details
+- Custom naming conventions
+- Security requirements
+- Performance guidelines
+- Testing requirements
+- Patterns to ignore
+
+### Integration with GitHub Actions
+
+You can automate the review process with a GitHub Action:
+
+```yaml
+name: Claude Code Review
+
+on:
+  pull_request:
+    types: [opened, synchronize]
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Get PR diff
+        run: gh pr diff ${{ github.event.pull_request.number }} > pr-diff.patch
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Run Claude Code review
+        run: |
+          # Run claude code review (requires ANTHROPIC_API_KEY)
+          claude --print "Review this PR using .github/prompts/code-review.md guidelines:
+
+          $(cat pr-diff.patch)" > review-output.md
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+
+      - name: Post overview comment
+        if: always()
+        run: |
+          if [ -f pr-overview.md ]; then
+            gh pr comment ${{ github.event.pull_request.number }} --body-file pr-overview.md
+          fi
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Post inline comments
+        if: always()
+        run: |
+          if [ -f pr-comments.json ]; then
+            cat pr-comments.json | reviewdog -f=rdjson -reporter=github-pr-review
+          fi
+        env:
+          REVIEWDOG_GITHUB_API_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+```
+
 ## Required Secrets
 
 All workflows require the following secret to be configured in the repository:
