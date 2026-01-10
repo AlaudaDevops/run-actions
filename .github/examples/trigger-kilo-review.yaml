@@ -41,9 +41,8 @@ jobs:
             --repo alaudadevops/run-actions \
             --field repository="${{ github.repository }}" \
             --field pr_number="${{ steps.pr-number.outputs.pr_number }}" \
-            --field model="anthropic/claude-sonnet-4-20250514" \
-            --field review_style="balanced"
+            --field review_style="strict"
 
           echo "✅ Kilo PR Review triggered for ${{ github.repository }}#${{ steps.pr-number.outputs.pr_number }}"
         env:
-          GH_TOKEN: ${{ secrets.RUN_ACTIONS_TOKEN }}
+          GH_TOKEN: ${{ secrets.TOKEN }}

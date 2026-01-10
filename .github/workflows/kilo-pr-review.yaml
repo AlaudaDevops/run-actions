@@ -11,11 +11,6 @@ on:
         description: "Pull request number to review"
         required: true
         type: string
-      model:
-        description: "AI model to use for review"
-        required: false
-        default: "mistralai/devstral-2512:free"
-        type: string
       review_style:
         description: "Review style (strict, balanced, lenient)"
         required: false
@@ -37,11 +32,6 @@ on:
         description: "Pull request number to review"
         required: true
         type: string
-      model:
-        description: "AI model to use for review"
-        required: false
-        default: "mistralai/devstral-2512:free"
-        type: string
       review_style:
         description: "Review style (strict, balanced, lenient)"
         required: false
@@ -59,13 +49,13 @@ on:
       KILO_API_KEY:
         description: "API key for the AI provider (e.g., Anthropic API key)"
         required: true
-      KILO_POST_KEY:
-        description: Second key used in kilocode?
 
 env:
   REVIEW_COMMENT_MARKER: "<!-- kilo-pr-review-comment -->"
+  INLINE_COMMENT_MARKER: "<!-- ai-code-review-inline -->"
   SHARED_PROMPT_PATH: ".github/prompts/code-review.md"
   PERSONALIZED_PROMPT_PATH: ".github/prompts/pr-review.md"
+  AI_MODEL: "mistralai/devstral-2512:free"
 
 jobs:
   review-pr:
@@ -159,15 +149,6 @@ jobs:
         run: |
           npm install -g @kilocode/cli
           echo "✅ Kilo CLI installed: $(kilocode --version || echo 'version check not supported')"
-
-      # - name: Install reviewdog
-      #   if: steps.validate-pr.outputs.skip != 'true'
-      #   run: |
-      #     curl -sfL https://raw.githubusercontent.com/reviewdog/reviewdog/master/install.sh | sh -s -- -b /usr/local/bin
-      #     echo "✅ Reviewdog installed: $(reviewdog --version)"
-      - uses: reviewdog/action-setup@d8edfce3dd5e1ec6978745e801f9c50b5ef80252 # v1.4.0
-        with:
-          reviewdog_version: latest
 
       - name: Clone target repository
         if: steps.validate-pr.outputs.skip != 'true'
@@ -318,7 +299,7 @@ jobs:
                 "id": "default",
                 "provider": "kilocode",
                 "kilocodeToken": "${{ secrets.KILO_API_KEY }}",
-                "kilocodeModel": "${{ inputs.model }}"
+                "kilocodeModel": "$AI_MODEL"
               }
             ],
             "autoApproval": {
@@ -354,17 +335,25 @@ jobs:
           fi
 
           if [ -f "pr-comments.json" ]; then
-            cp pr-comments.json ../review_comments.json
-            echo "✅ Review comments saved to ../review_comments.json"
-            cat pr-comments.json
-            echo "------------------------"
-            HAS_COMMENTS=true
-            # Count diagnostics in the JSON
-            COMMENT_COUNT=$(jq '.diagnostics | length' pr-comments.json 2>/dev/null || echo "0")
-            echo "📊 Found $COMMENT_COUNT review comments"
+            # Validate JSON before processing
+            if jq empty pr-comments.json 2>/dev/null; then
+              cp pr-comments.json ../review_comments.json
+              echo "✅ Review comments saved to ../review_comments.json"
+              cat pr-comments.json
+              echo "------------------------"
+              HAS_COMMENTS=true
+              # Count diagnostics in the JSON
+              COMMENT_COUNT=$(jq '.diagnostics | length' pr-comments.json 2>/dev/null || echo "0")
+              echo "📊 Found $COMMENT_COUNT review comments"
+            else
+              echo "⚠️ pr-comments.json is not valid JSON, skipping"
+              echo '{"source":{"name":"ai-code-review","url":"https://github.com/alaudadevops/run-actions"},"diagnostics":[]}' > ../review_comments.json
+              COMMENT_COUNT=0
+            fi
           else
             echo "❌ No review comments found"
             echo '{"source":{"name":"ai-code-review","url":"https://github.com/alaudadevops/run-actions"},"diagnostics":[]}' > ../review_comments.json
+            COMMENT_COUNT=0
           fi
 
           echo "✅ Kilo review completed"
@@ -373,48 +362,107 @@ jobs:
           echo "has_overview=$HAS_OVERVIEW" >> $GITHUB_OUTPUT
           echo "has_comments=$HAS_COMMENTS" >> $GITHUB_OUTPUT
 
-      - name: Post inline comments with reviewdog
+      - name: Delete existing inline comments
         if: steps.validate-pr.outputs.skip != 'true' && inputs.dry_run != true
-        env:
-          REVIEWDOG_GITHUB_API_TOKEN: ${{ secrets.TOKEN }}
-          CI_PULL_REQUEST: ${{ inputs.pr_number }}
-          CI_COMMIT: ${{ steps.validate-pr.outputs.head_sha }}
         run: |
           REPO="${{ inputs.repository }}"
-          CI_REPO_OWNER="${REPO%/*}"
-          CI_REPO_NAME="${REPO#*/}"
+          PR_NUMBER="${{ inputs.pr_number }}"
+          MARKER="${{ env.INLINE_COMMENT_MARKER }}"
 
-          export CI_REPO_OWNER
-          export CI_REPO_NAME
-          WORKFLOW_URL="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          echo "🗑️ Deleting existing AI review inline comments..."
 
-          echo "📝 Posting inline comments with reviewdog... Owner: $CI_REPO_OWNER, Repo: $CI_REPO_NAME"
+          # Get all review comments on the PR
+          COMMENTS=$(gh api "repos/$REPO/pulls/$PR_NUMBER/comments" --paginate 2>/dev/null || echo "[]")
 
-          if [ -f review_comments.json ]; then
-            # Post comments using reviewdog with rdjson format
-            cat review_comments.json | reviewdog -f=rdjson \
-              -log-level=debug \
-              -reporter=github-pr-review \
-              -name="AI Code Review" \
-              -filter-mode=nofilter \
-              -fail-level=any \
-              -level=info || true
+          # Find and delete comments with our marker
+          DELETED=0
+          echo "$COMMENTS" | jq -r ".[] | select(.body | contains(\"$MARKER\")) | .id" | while read -r COMMENT_ID; do
+            if [ -n "$COMMENT_ID" ] && [ "$COMMENT_ID" != "null" ]; then
+              gh api "repos/$REPO/pulls/comments/$COMMENT_ID" --method DELETE 2>/dev/null && {
+                echo "  Deleted comment $COMMENT_ID"
+                DELETED=$((DELETED + 1))
+              } || echo "  Failed to delete comment $COMMENT_ID"
+            fi
+          done
 
-            echo "✅ Inline comments posted"
-          else
-            echo "ℹ️ No comments to post"
+          echo "✅ Cleanup complete"
+
+      - name: Post inline comments via GitHub API
+        if: steps.validate-pr.outputs.skip != 'true' && inputs.dry_run != true
+        run: |
+          REPO="${{ inputs.repository }}"
+          PR_NUMBER="${{ inputs.pr_number }}"
+          HEAD_SHA="${{ steps.validate-pr.outputs.head_sha }}"
+          MARKER="${{ env.INLINE_COMMENT_MARKER }}"
+
+          echo "📝 Posting inline comments via GitHub API..."
+
+          if [ ! -f review_comments.json ]; then
+            echo "ℹ️ No comments file found"
+            exit 0
           fi
+
+          # Validate JSON first
+          if ! jq empty review_comments.json 2>/dev/null; then
+            echo "⚠️ review_comments.json is not valid JSON, skipping"
+            exit 0
+          fi
+
+          # Check if there are any diagnostics
+          DIAG_COUNT=$(jq '.diagnostics | length' review_comments.json 2>/dev/null || echo "0")
+          if [ "$DIAG_COUNT" = "0" ] || [ -z "$DIAG_COUNT" ]; then
+            echo "ℹ️ No diagnostics to post"
+            exit 0
+          fi
+
+          echo "📊 Posting $DIAG_COUNT inline comments..."
+
+          # Read and post each diagnostic as a review comment
+          jq -c '.diagnostics[]' review_comments.json 2>/dev/null | while read -r diag; do
+            FILE=$(echo "$diag" | jq -r '.location.path // empty')
+            LINE=$(echo "$diag" | jq -r '.location.range.start.line // 1')
+            MESSAGE=$(echo "$diag" | jq -r '.message // empty')
+            SEVERITY=$(echo "$diag" | jq -r '.severity // "INFO"')
+            CODE=$(echo "$diag" | jq -r '.code.value // empty')
+
+            # Skip if essential fields are missing
+            if [ -z "$FILE" ] || [ -z "$MESSAGE" ]; then
+              echo "  ⚠️ Skipping invalid diagnostic (missing file or message)"
+              continue
+            fi
+
+            # Format the comment body with marker for future cleanup
+            if [ -n "$CODE" ]; then
+              BODY=$(printf "%s\n**[%s]** \`%s\`\n\n%s" "$MARKER" "$SEVERITY" "$CODE" "$MESSAGE")
+            else
+              BODY=$(printf "%s\n**[%s]**\n\n%s" "$MARKER" "$SEVERITY" "$MESSAGE")
+            fi
+
+            echo "  → $FILE:$LINE [$SEVERITY]"
+
+            # Create a review comment on the PR
+            gh api "repos/$REPO/pulls/$PR_NUMBER/comments" \
+              --method POST \
+              -f body="$BODY" \
+              -f commit_id="$HEAD_SHA" \
+              -f path="$FILE" \
+              -F line="$LINE" \
+              -f side="RIGHT" 2>/dev/null || echo "    ⚠️ Failed to post (line may not be in diff)"
+          done
+
+          echo "✅ Inline comments posted"
 
       - name: Post overview comment
         if: steps.validate-pr.outputs.skip != 'true' && inputs.dry_run != true
         run: |
           REPO="${{ inputs.repository }}"
           PR_NUMBER="${{ inputs.pr_number }}"
-          MODEL="${{ inputs.model }}"
+          MODEL="$AI_MODEL"
           REVIEW_STYLE="${{ inputs.review_style }}"
           HAS_PERSONALIZED="${{ steps.personalized-prompt.outputs.has_personalized }}"
           COMMENT_COUNT="${{ steps.kilo-review.outputs.comment_count }}"
           MARKER="${{ env.REVIEW_COMMENT_MARKER }}"
+          WORKFLOW_URL="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
 
           echo "📝 Preparing overview comment..."
 
@@ -441,7 +489,7 @@ jobs:
           <details>
           <summary>ℹ️ About this review</summary>
 
-          This review was automatically generated using the [\`run-actions\`](https://github.com/alaudadevops/run-actions) workflow.
+          This review was automatically generated using the [\`run-actions\`]($WORKFLOW_URL) workflow.
 
           - **Shared prompt**: [\`${{ env.SHARED_PROMPT_PATH }}\`](https://github.com/alaudadevops/run-actions/blob/main/${{ env.SHARED_PROMPT_PATH }})
           $([ "$HAS_PERSONALIZED" = "true" ] && echo "- **Repository prompt**: \`${{ env.PERSONALIZED_PROMPT_PATH }}\`" || echo "- *No repository-specific prompt configured*")
@@ -523,7 +571,7 @@ jobs:
           SKIP="${{ steps.validate-pr.outputs.skip }}"
           DRY_RUN="${{ inputs.dry_run }}"
           COMMENT_COUNT="${{ steps.kilo-review.outputs.comment_count }}"
-          MODEL="${{ inputs.model }}"
+          MODEL="$AI_MODEL"
           REVIEW_STYLE="${{ inputs.review_style }}"
 
           cat >> $GITHUB_STEP_SUMMARY << EOF
