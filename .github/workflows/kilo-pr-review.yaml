@@ -103,8 +103,8 @@ jobs:
 
           echo "🔍 Validating PR #$PR_NUMBER in $REPO..."
 
-          # Get PR details
-          PR_DATA=$(gh pr view "$PR_NUMBER" --repo "$REPO" --json number,title,state,headRefName,baseRefName,author,additions,deletions,changedFiles 2>&1) || {
+          # Get PR details including head SHA for check status
+          PR_DATA=$(gh pr view "$PR_NUMBER" --repo "$REPO" --json number,title,state,headRefName,baseRefName,author,additions,deletions,changedFiles,headRefOid 2>&1) || {
             echo "❌ Failed to fetch PR #$PR_NUMBER from $REPO"
             echo "Error: $PR_DATA"
             exit 1
@@ -128,15 +128,46 @@ jobs:
           echo "additions=$(echo "$PR_DATA" | jq -r '.additions')" >> $GITHUB_OUTPUT
           echo "deletions=$(echo "$PR_DATA" | jq -r '.deletions')" >> $GITHUB_OUTPUT
           echo "changed_files=$(echo "$PR_DATA" | jq -r '.changedFiles')" >> $GITHUB_OUTPUT
+          echo "head_sha=$(echo "$PR_DATA" | jq -r '.headRefOid')" >> $GITHUB_OUTPUT
           echo "skip=false" >> $GITHUB_OUTPUT
 
           echo "✅ PR validated successfully"
+
+      - name: Set commit status (pending)
+        if: steps.validate-pr.outputs.skip != 'true'
+        id: create-status
+        run: |
+          REPO="${{ inputs.repository }}"
+          HEAD_SHA="${{ steps.validate-pr.outputs.head_sha }}"
+          WORKFLOW_URL="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+
+          echo "📝 Setting commit status to pending for $HEAD_SHA..."
+
+          gh api "repos/$REPO/statuses/$HEAD_SHA" \
+            --method POST \
+            -f state="pending" \
+            -f target_url="$WORKFLOW_URL" \
+            -f description="AI Code Review in progress..." \
+            -f context="AI Code Review" || {
+            echo "⚠️ Failed to set commit status"
+          }
+
+          echo "✅ Commit status set to pending"
 
       - name: Install Kilo CLI
         if: steps.validate-pr.outputs.skip != 'true'
         run: |
           npm install -g @kilocode/cli
           echo "✅ Kilo CLI installed: $(kilocode --version || echo 'version check not supported')"
+
+      # - name: Install reviewdog
+      #   if: steps.validate-pr.outputs.skip != 'true'
+      #   run: |
+      #     curl -sfL https://raw.githubusercontent.com/reviewdog/reviewdog/master/install.sh | sh -s -- -b /usr/local/bin
+      #     echo "✅ Reviewdog installed: $(reviewdog --version)"
+      - uses: reviewdog/action-setup@d8edfce3dd5e1ec6978745e801f9c50b5ef80252 # v1.4.0
+        with:
+          reviewdog_version: latest
 
       - name: Clone target repository
         if: steps.validate-pr.outputs.skip != 'true'
@@ -305,53 +336,99 @@ jobs:
         run: |
           echo "🤖 Starting Kilo code review..."
 
+          kilocode --auto --json --timeout 600 "$(cat ../review_prompt.md)" | tee ../kilo_output.log
 
-
-          kilocode --auto --json --timeout 600 "$(cat ../review_prompt.md)" | tee ../review_output.md
-
-          ls -la
-          ls -la ..
+          COMMENT_COUNT=0
+          HAS_OVERVIEW=false
+          HAS_COMMENTS=false
 
           if [ -f "pr-overview.md" ]; then
-            cat pr-overview.md > ../review_output.md
+            cp pr-overview.md ../review_output.md
             echo "✅ Review output saved to ../review_output.md"
             cat pr-overview.md
             echo "------------------------"
+            HAS_OVERVIEW=true
           else
             echo "❌ No review output found"
+            echo "No review output generated" > ../review_output.md
           fi
+
           if [ -f "pr-comments.json" ]; then
-            cat pr-comments.json > ../review_comments.json
+            cp pr-comments.json ../review_comments.json
             echo "✅ Review comments saved to ../review_comments.json"
             cat pr-comments.json
             echo "------------------------"
+            HAS_COMMENTS=true
+            # Count diagnostics in the JSON
+            COMMENT_COUNT=$(jq '.diagnostics | length' pr-comments.json 2>/dev/null || echo "0")
+            echo "📊 Found $COMMENT_COUNT review comments"
           else
             echo "❌ No review comments found"
+            echo '{"source":{"name":"ai-code-review","url":"https://github.com/alaudadevops/run-actions"},"diagnostics":[]}' > ../review_comments.json
           fi
 
           echo "✅ Kilo review completed"
           echo "📄 Review output saved ($(wc -l < ../review_output.md) lines)"
+          echo "comment_count=$COMMENT_COUNT" >> $GITHUB_OUTPUT
+          echo "has_overview=$HAS_OVERVIEW" >> $GITHUB_OUTPUT
+          echo "has_comments=$HAS_COMMENTS" >> $GITHUB_OUTPUT
 
-      - name: Format review comment
-        # if: steps.validate-pr.outputs.skip != 'true'
-        if: false
-        id: format-comment
+      - name: Post inline comments with reviewdog
+        if: steps.validate-pr.outputs.skip != 'true' && inputs.dry_run != true
+        env:
+          REVIEWDOG_GITHUB_API_TOKEN: ${{ secrets.TOKEN }}
+          CI_PULL_REQUEST: ${{ inputs.pr_number }}
+          CI_COMMIT: ${{ steps.validate-pr.outputs.head_sha }}
+        run: |
+          REPO="${{ inputs.repository }}"
+          CI_REPO_OWNER="${REPO%/*}"
+          CI_REPO_NAME="${REPO#*/}"
+
+          export CI_REPO_OWNER
+          export CI_REPO_NAME
+          WORKFLOW_URL="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+
+          echo "📝 Posting inline comments with reviewdog... Owner: $CI_REPO_OWNER, Repo: $CI_REPO_NAME"
+
+          if [ -f review_comments.json ]; then
+            # Post comments using reviewdog with rdjson format
+            cat review_comments.json | reviewdog -f=rdjson \
+              -log-level=debug \
+              -reporter=github-pr-review \
+              -name="AI Code Review" \
+              -filter-mode=nofilter \
+              -fail-level=any \
+              -level=info || true
+
+            echo "✅ Inline comments posted"
+          else
+            echo "ℹ️ No comments to post"
+          fi
+
+      - name: Post overview comment
+        if: steps.validate-pr.outputs.skip != 'true' && inputs.dry_run != true
         run: |
           REPO="${{ inputs.repository }}"
           PR_NUMBER="${{ inputs.pr_number }}"
           MODEL="${{ inputs.model }}"
           REVIEW_STYLE="${{ inputs.review_style }}"
           HAS_PERSONALIZED="${{ steps.personalized-prompt.outputs.has_personalized }}"
+          COMMENT_COUNT="${{ steps.kilo-review.outputs.comment_count }}"
+          MARKER="${{ env.REVIEW_COMMENT_MARKER }}"
 
+          echo "📝 Preparing overview comment..."
+
+          # Create formatted review comment
           cat > formatted_review.md << EOF
-          ${{ env.REVIEW_COMMENT_MARKER }}
+          $MARKER
 
-          ## 🤖 Kilo AI Code Review
+          ## 🤖 AI Code Review
 
           | Property | Value |
           |----------|-------|
           | **Model** | \`$MODEL\` |
           | **Style** | $REVIEW_STYLE |
+          | **Issues Found** | $COMMENT_COUNT |
           | **Personalized Prompt** | $([ "$HAS_PERSONALIZED" = "true" ] && echo "✅ Yes" || echo "❌ No") |
           | **Reviewed at** | $(date -u +"%Y-%m-%d %H:%M:%S UTC") |
 
@@ -364,7 +441,7 @@ jobs:
           <details>
           <summary>ℹ️ About this review</summary>
 
-          This review was automatically generated by [Kilo Code](https://kilo.ai) using the [\`run-actions\`](https://github.com/alaudadevops/run-actions) workflow.
+          This review was automatically generated using the [\`run-actions\`](https://github.com/alaudadevops/run-actions) workflow.
 
           - **Shared prompt**: [\`${{ env.SHARED_PROMPT_PATH }}\`](https://github.com/alaudadevops/run-actions/blob/main/${{ env.SHARED_PROMPT_PATH }})
           $([ "$HAS_PERSONALIZED" = "true" ] && echo "- **Repository prompt**: \`${{ env.PERSONALIZED_PROMPT_PATH }}\`" || echo "- *No repository-specific prompt configured*")
@@ -372,44 +449,12 @@ jobs:
           </details>
           EOF
 
-          echo "✅ Review comment formatted"
-
-      - name: Find existing review comment
-        if: false
-        # if: steps.validate-pr.outputs.skip != 'true' && inputs.dry_run != true
-        id: find-comment
-        run: |
-          REPO="${{ inputs.repository }}"
-          PR_NUMBER="${{ inputs.pr_number }}"
-          MARKER="${{ env.REVIEW_COMMENT_MARKER }}"
-
+          # Find existing comment with marker
           echo "🔍 Looking for existing review comment..."
-
-          # Get all comments on the PR
           COMMENTS=$(gh api "repos/$REPO/issues/$PR_NUMBER/comments" --paginate 2>/dev/null || echo "[]")
-
-          # Find comment with our marker
           COMMENT_ID=$(echo "$COMMENTS" | jq -r ".[] | select(.body | contains(\"$MARKER\")) | .id" | head -1)
 
           if [ -n "$COMMENT_ID" ] && [ "$COMMENT_ID" != "null" ]; then
-            echo "✅ Found existing comment: $COMMENT_ID"
-            echo "comment_id=$COMMENT_ID" >> $GITHUB_OUTPUT
-            echo "has_comment=true" >> $GITHUB_OUTPUT
-          else
-            echo "ℹ️ No existing review comment found"
-            echo "has_comment=false" >> $GITHUB_OUTPUT
-          fi
-
-      - name: Post or update review comment
-        if: false
-        # if: steps.validate-pr.outputs.skip != 'true' && inputs.dry_run != true
-        run: |
-          REPO="${{ inputs.repository }}"
-          PR_NUMBER="${{ inputs.pr_number }}"
-          HAS_COMMENT="${{ steps.find-comment.outputs.has_comment }}"
-          COMMENT_ID="${{ steps.find-comment.outputs.comment_id }}"
-
-          if [ "$HAS_COMMENT" = "true" ]; then
             echo "📝 Updating existing comment $COMMENT_ID..."
             gh api "repos/$REPO/issues/comments/$COMMENT_ID" \
               --method PATCH \
@@ -421,28 +466,52 @@ jobs:
             echo "✅ Comment created"
           fi
 
-      - name: Submit PR review with inline comments
-        if: false
-        # if: steps.validate-pr.outputs.skip != 'true' && inputs.dry_run != true
+      - name: Update commit status (completed)
+        if: always() && steps.validate-pr.outputs.skip != 'true'
         run: |
           REPO="${{ inputs.repository }}"
-          PR_NUMBER="${{ inputs.pr_number }}"
+          HEAD_SHA="${{ steps.validate-pr.outputs.head_sha }}"
+          COMMENT_COUNT="${{ steps.kilo-review.outputs.comment_count }}"
+          WORKFLOW_URL="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
 
-          echo "📝 Submitting PR review..."
+          echo "📝 Updating commit status for $HEAD_SHA..."
 
-          # Submit an approval or request changes based on critical issues found
-          # For now, we submit a neutral "COMMENT" review
-          gh pr review "$PR_NUMBER" --repo "$REPO" --comment --body "🤖 Kilo AI has reviewed this PR. See the detailed review comment above."
+          # Determine state based on comment count
+          if [ -z "$COMMENT_COUNT" ] || [ "$COMMENT_COUNT" = "0" ]; then
+            STATE="success"
+            DESCRIPTION="No issues found"
+          else
+            STATE="failure"
+            DESCRIPTION="Found $COMMENT_COUNT issue(s)"
+          fi
 
-          echo "✅ PR review submitted"
+          # Check if the review step failed
+          if [ "${{ steps.kilo-review.outcome }}" = "failure" ]; then
+            STATE="error"
+            DESCRIPTION="Review process failed"
+          fi
+
+          gh api "repos/$REPO/statuses/$HEAD_SHA" \
+            --method POST \
+            -f state="$STATE" \
+            -f target_url="$WORKFLOW_URL" \
+            -f description="$DESCRIPTION" \
+            -f context="AI Code Review" || {
+            echo "⚠️ Failed to update commit status"
+          }
+
+          echo "✅ Commit status updated: $STATE - $DESCRIPTION"
 
       - name: Output review (dry run)
-        # if: steps.validate-pr.outputs.skip != 'true' && inputs.dry_run == true
-        if: false
+        if: steps.validate-pr.outputs.skip != 'true' && inputs.dry_run == true
         run: |
           echo "🔍 DRY RUN MODE - Review output:"
           echo "================================"
-          cat formatted_review.md
+          echo "## Overview:"
+          cat review_output.md
+          echo ""
+          echo "## Inline Comments (JSON):"
+          cat review_comments.json | jq .
           echo "================================"
           echo "ℹ️ In non-dry-run mode, this would be posted to the PR"
 
@@ -453,21 +522,36 @@ jobs:
           PR_NUMBER="${{ inputs.pr_number }}"
           SKIP="${{ steps.validate-pr.outputs.skip }}"
           DRY_RUN="${{ inputs.dry_run }}"
+          COMMENT_COUNT="${{ steps.kilo-review.outputs.comment_count }}"
+          MODEL="${{ inputs.model }}"
+          REVIEW_STYLE="${{ inputs.review_style }}"
 
           cat >> $GITHUB_STEP_SUMMARY << EOF
-          # Kilo PR Review Summary
+          # AI PR Review Summary
 
           | Property | Value |
           |----------|-------|
           | **Repository** | [$REPO](https://github.com/$REPO) |
           | **PR** | [#$PR_NUMBER](https://github.com/$REPO/pull/$PR_NUMBER) |
+          | **Model** | \`$MODEL\` |
+          | **Style** | $REVIEW_STYLE |
+          | **Issues Found** | ${COMMENT_COUNT:-0} |
           | **Status** | $([ "$SKIP" = "true" ] && echo "⏭️ Skipped" || echo "✅ Completed") |
           | **Mode** | $([ "$DRY_RUN" = "true" ] && echo "🔍 Dry Run" || echo "📝 Live") |
 
           EOF
 
-          if [ "$SKIP" != "true" ] && [ -f formatted_review.md ]; then
+          if [ "$SKIP" != "true" ] && [ -f review_output.md ]; then
             echo "## Review Output" >> $GITHUB_STEP_SUMMARY
             echo "" >> $GITHUB_STEP_SUMMARY
-            cat formatted_review.md >> $GITHUB_STEP_SUMMARY
+            cat review_output.md >> $GITHUB_STEP_SUMMARY
+          fi
+
+          if [ "$SKIP" != "true" ] && [ -f review_comments.json ]; then
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "## Inline Comments" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo '```json' >> $GITHUB_STEP_SUMMARY
+            cat review_comments.json >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
           fi
