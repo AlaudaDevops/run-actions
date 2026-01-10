@@ -1,0 +1,120 @@
+{
+  "source": {
+    "name": "ai-code-review",
+    "url": "https://github.com/alaudadevops/run-actions"
+  },
+  "diagnostics": [
+    {
+      "message": "Consider adding validation to ensure workflow file exists before starting the server. This would provide better user feedback and prevent runtime errors.",
+      "location": {
+        "path": "pr-cli/cmd/serve.go",
+        "range": {
+          "start": {
+            "line": 185,
+            "column": 1
+          },
+          "end": {
+            "line": 203,
+            "column": 80
+          }
+        }
+      },
+      "severity": "INFO",
+      "code": {
+        "value": "refactor/validation",
+        "url": "https://github.com/alaudadevops/toolbox"
+      },
+      "suggestions": [
+        {
+          "text": "// Add workflow file validation before starting server\nif wc.PREventEnabled && wc.WorkflowFile != \"\" {\n    if _, err := os.Stat(wc.WorkflowFile); err != nil {\n        return fmt.Errorf(\"workflow file %q does not exist: %w\", wc.WorkflowFile, err)\n    }\n}"
+        }
+      ]
+    },
+    {
+      "message": "The processPullRequestEvent function creates a new GitHub client for each PR event, which could be optimized to reuse clients from a pool for better performance.",
+      "location": {
+        "path": "pr-cli/pkg/webhook/handlers.go",
+        "range": {
+          "start": {
+            "line": 235,
+            "column": 1
+          },
+          "end": {
+            "line": 250,
+            "column": 80
+          }
+        }
+      },
+      "severity": "WARNING",
+      }
+    },
+    {
+      "message": "Add metrics for workflow input merging operations to track how often static inputs override dynamic ones.",
+      "location": {
+        "path": "pr-cli/pkg/webhook/handlers.go",
+        "range": {
+          "start": {
+            "line": 270,
+            "column": 1
+          },
+          "end": {
+            "line": 280,
+            "column": 80
+          }
+        }
+      },
+      "severity": "INFO",
+      "code": {
+        "value": "refactor/metrics",
+        "url": "https://github.com/alaudadevops/toolbox"
+      }
+    },
+    {
+      "message": "Consider adding validation for workflow ref format to ensure it's a valid Git reference.",
+      "location": {
+        "path": "pr-cli/pkg/config/webhook.go",
+        "range": {
+          "start": {
+            "line": 180,
+            "column": 1
+          },
+          "end": {
+            "line": 185,
+            "column": 80
+          }
+        }
+      },
+      "severity": "INFO",
+      "code": {
+        "value": "refactor/validation",
+        "url": "https://github.com/alaudadevops/toolbox"
+      }
+    },
+    {
+      "message": "The isValidWorkflowPath function could be more comprehensive in validating workflow file paths to prevent potential security issues.",
+      "location": {
+        "path": "pr-cli/pkg/config/webhook.go",
+        "range": {
+          "start": {
+            "line": 200,
+            "column": 1
+          },
+          "end": {
+            "line": 210,
+            "column": 80
+          }
+        }
+      },
+      "severity": "WARNING",
+      "code": {
+        "value": "security/path-validation",
+        "url": "https://github.com/alaudadevops/toolbox"
+      },
+      "suggestions": [
+        {
+          "text": "func isValidWorkflowPath(path string) bool {\n    if path == \"\" {\n        return false\n    }\n    if strings.Contains(path, \"..\") {\n        return false\n    }\n    if !strings.HasPrefix(path, \".github/workflows/\") {\n        return false\n    }\n    return strings.HasSuffix(path, \".yml\") || strings.HasSuffix(path, \".yaml\")\n}"
+        }
+      ]
+    }
+  ]
+}

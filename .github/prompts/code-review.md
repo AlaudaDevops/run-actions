@@ -172,6 +172,68 @@ When providing a `suggestions` array:
 5. Ensure all file paths in comments are relative to the repository root
 6. Ensure line numbers match the actual diff (use the "new" line numbers, not old)
 
+## CRITICAL: Line Number Calculation
+
+**You MUST use the correct line numbers from the diff.** GitHub will reject comments on lines that don't exist in the diff.
+
+### How to Read Diff Headers
+
+Each diff hunk starts with a header like:
+```
+@@ -OLD_START,OLD_COUNT +NEW_START,NEW_COUNT @@
+```
+
+For example:
+```diff
+@@ -167,6 +185,25 @@ func runServe(cmd *cobra.Command, args []string) error {
++	// Pull request event configuration
++	if prEventEnabled, _ := cmd.Flags().GetBool("pr-event-enabled"); cmd.Flags().Changed("pr-event-enabled") {
+```
+
+This means:
+- The hunk starts at line **185** in the NEW file (after the change)
+- Lines with `+` prefix are ADDED lines - use consecutive numbers starting from NEW_START
+- Lines with `-` prefix are REMOVED lines - do NOT reference these
+- Lines with no prefix are CONTEXT lines - they exist in both old and new
+
+### Line Number Rules
+
+1. **ONLY reference lines that appear in the diff** - either added (`+`) or context (no prefix)
+2. **Use the NEW line numbers** - count from the `+NEW_START` in the hunk header
+3. **Never reference removed lines** (`-` prefix) - they don't exist in the new code
+4. **Calculate precisely**: For line N within a hunk, the actual line number is:
+   - `NEW_START + (position_in_hunk - 1)` where position counts only `+` and context lines
+
+### Example Calculation
+
+```diff
+@@ -50,6 +51,9 @@ Example:
+   # Start with TLS
+   pr-cli serve --tls-enabled --tls-cert-file=/etc/certs/tls.crt --tls-key-file=/etc/certs/tls.key
+
++  # Start with PR event handling to trigger workflows
++  pr-cli serve --pr-event-enabled --workflow-file=.github/workflows/pr-check.yml
++
+ Environment Variables:
+```
+
+To reference the new comment line "# Start with PR event handling":
+- Hunk starts at NEW line 51
+- Context lines before the `+` lines: 2 lines (the two lines shown with no prefix)
+- The first `+` line is at position 3 in the hunk
+- **Correct line number: 51 + 3 - 1 = 53**
+
+### Common Mistakes to Avoid
+
+❌ **WRONG**: Guessing line numbers or using round numbers (100, 200, 250)
+❌ **WRONG**: Using line numbers from the OLD file (before `-`)
+❌ **WRONG**: Referencing line numbers outside the diff hunks
+❌ **WRONG**: Using column 80 for all end columns
+
+✅ **CORRECT**: Calculate exact line from diff hunk header
+✅ **CORRECT**: Only reference lines visible in the diff
+✅ **CORRECT**: Use actual column positions when possible, or omit end column
+
 ## Handling Large PRs
 
 For large PRs (>500 lines changed):

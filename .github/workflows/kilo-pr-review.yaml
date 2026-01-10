@@ -55,7 +55,7 @@ env:
   INLINE_COMMENT_MARKER: "<!-- ai-code-review-inline -->"
   SHARED_PROMPT_PATH: ".github/prompts/code-review.md"
   PERSONALIZED_PROMPT_PATH: ".github/prompts/pr-review.md"
-  AI_MODEL: "mistralai/devstral-2512:free"
+  AI_MODEL: "kwaipilot/kat-coder-pro:free"
 
 jobs:
   review-pr:
@@ -70,8 +70,6 @@ jobs:
         uses: actions/setup-node@v6
         with:
           node-version: "24"
-
-
 
       - name: Install GitHub CLI
         uses: dev-hanz-ops/install-gh-cli-action@v0.2.1
@@ -317,7 +315,7 @@ jobs:
         run: |
           echo "🤖 Starting Kilo code review..."
 
-          kilocode --auto --json --timeout 600 "$(cat ../review_prompt.md)" | tee ../kilo_output.log
+          kilocode --auto --timeout 600 "$(cat ../review_prompt.md)" | tee ../kilo_output.log
 
           COMMENT_COUNT=0
           HAS_OVERVIEW=false
@@ -335,16 +333,39 @@ jobs:
           fi
 
           if [ -f "pr-comments.json" ]; then
-            # Validate JSON before processing
+            # Validate JSON syntax first
             if jq empty pr-comments.json 2>/dev/null; then
-              cp pr-comments.json ../review_comments.json
+              # Validate JSON schema structure
+              SCHEMA_VALID=true
+
+              # Check required top-level fields
+              if ! jq -e '.source and .diagnostics' pr-comments.json >/dev/null 2>&1; then
+                echo "⚠️ pr-comments.json missing required fields (source, diagnostics)"
+                SCHEMA_VALID=false
+              fi
+
+              # Validate each diagnostic has required fields
+              if [ "$SCHEMA_VALID" = "true" ]; then
+                INVALID_DIAGS=$(jq '[.diagnostics[] | select(.message == null or .location == null or .location.path == null or .location.range == null or .location.range.start == null or .location.range.start.line == null)] | length' pr-comments.json 2>/dev/null || echo "999")
+                if [ "$INVALID_DIAGS" != "0" ]; then
+                  echo "⚠️ Found $INVALID_DIAGS diagnostic(s) with missing required fields (message, location.path, location.range.start.line)"
+                  # Filter out invalid diagnostics instead of rejecting entirely
+                  jq '{source: .source, diagnostics: [.diagnostics[] | select(.message != null and .location != null and .location.path != null and .location.range != null and .location.range.start != null and .location.range.start.line != null)]}' pr-comments.json > ../review_comments.json
+                  echo "✅ Filtered to valid diagnostics only"
+                else
+                  cp pr-comments.json ../review_comments.json
+                fi
+              else
+                echo '{"source":{"name":"ai-code-review","url":"https://github.com/alaudadevops/run-actions"},"diagnostics":[]}' > ../review_comments.json
+              fi
+
               echo "✅ Review comments saved to ../review_comments.json"
-              cat pr-comments.json
+              cat ../review_comments.json
               echo "------------------------"
               HAS_COMMENTS=true
-              # Count diagnostics in the JSON
-              COMMENT_COUNT=$(jq '.diagnostics | length' pr-comments.json 2>/dev/null || echo "0")
-              echo "📊 Found $COMMENT_COUNT review comments"
+              # Count diagnostics in the validated JSON
+              COMMENT_COUNT=$(jq '.diagnostics | length' ../review_comments.json 2>/dev/null || echo "0")
+              echo "📊 Found $COMMENT_COUNT valid review comments"
             else
               echo "⚠️ pr-comments.json is not valid JSON, skipping"
               echo '{"source":{"name":"ai-code-review","url":"https://github.com/alaudadevops/run-actions"},"diagnostics":[]}' > ../review_comments.json
@@ -386,6 +407,79 @@ jobs:
           done
 
           echo "✅ Cleanup complete"
+
+      - name: Validate line numbers against diff
+        if: steps.validate-pr.outputs.skip != 'true'
+        run: |
+          echo "🔍 Validating diagnostic line numbers against PR diff..."
+
+          if [ ! -f review_comments.json ] || [ ! -f pr_diff.patch ]; then
+            echo "ℹ️ Missing review_comments.json or pr_diff.patch, skipping validation"
+            exit 0
+          fi
+
+          # Extract valid line ranges from diff for each file
+          # Format: file:start_line:end_line (for each hunk)
+          extract_valid_lines() {
+            local current_file=""
+            local new_line=0
+            local in_hunk=false
+
+            while IFS= read -r line; do
+              # Match diff file header: +++ b/path/to/file
+              if [[ "$line" =~ ^\+\+\+[[:space:]]b/(.+)$ ]]; then
+                current_file="${BASH_REMATCH[1]}"
+                in_hunk=false
+              # Match hunk header: @@ -old,count +new,count @@
+              elif [[ "$line" =~ ^@@[[:space:]]-[0-9]+(,[0-9]+)?[[:space:]]\+([0-9]+)(,[0-9]+)?[[:space:]]@@ ]]; then
+                new_line="${BASH_REMATCH[2]}"
+                in_hunk=true
+              elif [ "$in_hunk" = true ] && [ -n "$current_file" ]; then
+                # Lines starting with + or space (not -) are valid in new file
+                if [[ "$line" =~ ^[+\ ] ]]; then
+                  echo "$current_file:$new_line"
+                  ((new_line++))
+                elif [[ "$line" =~ ^- ]]; then
+                  # Removed line - don't increment new_line counter
+                  :
+                fi
+              fi
+            done < pr_diff.patch
+          }
+
+          # Build lookup of valid file:line combinations
+          echo "📄 Extracting valid lines from diff..."
+          VALID_LINES=$(extract_valid_lines | sort -u)
+          VALID_LINES_FILE=$(mktemp)
+          echo "$VALID_LINES" > "$VALID_LINES_FILE"
+          VALID_COUNT=$(wc -l < "$VALID_LINES_FILE" | tr -d ' ')
+          echo "  Found $VALID_COUNT valid file:line combinations"
+
+          # Filter diagnostics to only those with valid line numbers
+          echo "🔎 Filtering diagnostics..."
+          ORIGINAL_COUNT=$(jq '.diagnostics | length' review_comments.json)
+
+          jq -c '.diagnostics[]' review_comments.json | while read -r diag; do
+            FILE=$(echo "$diag" | jq -r '.location.path // empty')
+            LINE=$(echo "$diag" | jq -r '.location.range.start.line // 0')
+
+            if grep -q "^${FILE}:${LINE}$" "$VALID_LINES_FILE" 2>/dev/null; then
+              echo "$diag"
+            else
+              echo "  ⚠️ Skipping invalid line: $FILE:$LINE (not in diff)" >&2
+            fi
+          done | jq -s '{source: {"name": "ai-code-review", "url": "https://github.com/alaudadevops/run-actions"}, diagnostics: .}' > review_comments_validated.json
+
+          mv review_comments_validated.json review_comments.json
+          rm -f "$VALID_LINES_FILE"
+
+          FILTERED_COUNT=$(jq '.diagnostics | length' review_comments.json)
+          REMOVED=$((ORIGINAL_COUNT - FILTERED_COUNT))
+
+          if [ "$REMOVED" -gt 0 ]; then
+            echo "⚠️ Removed $REMOVED diagnostic(s) with invalid line numbers"
+          fi
+          echo "✅ Validation complete: $FILTERED_COUNT valid diagnostics remaining"
 
       - name: Post inline comments via GitHub API
         if: steps.validate-pr.outputs.skip != 'true' && inputs.dry_run != true
