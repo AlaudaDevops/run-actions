@@ -1,0 +1,190 @@
+{
+  "source": {
+    "name": "ai-code-review",
+    "url": "https://github.com/alaudadevops/run-actions"
+  },
+  "diagnostics": [
+    {
+      "message": "Consider adding validation for the workflow-file flag to ensure it's a valid path before starting the server",
+      "location": {
+        "path": "pr-cli/cmd/serve.go",
+        "range": {
+          "start": {
+            "line": 115,
+            "column": 1
+          },
+          "end": {
+            "line": 115,
+            "column": 80
+          }
+        }
+      },
+      "severity": "INFO",
+      "code": {
+        "value": "refactor/validation",
+        "url": "https://github.com/golang/go/wiki/CodeReviewComments#validate-inputs"
+      },
+      "suggestions": [
+        {
+          "text": "// Add validation for workflow file path\nif workflowFile != \"\" {\n    if _, err := os.Stat(workflowFile); err != nil {\n        return fmt.Errorf(\"workflow file does not exist: %w\", err)\n    }\n}"
+        }
+      ]
+    },
+    {
+      "message": "The processPullRequestEvent function creates a new GitHub client for each PR event, which could be optimized by reusing clients",
+      "location": {
+        "path": "pr-cli/pkg/webhook/handlers.go",
+        "range": {
+          "start": {
+            "line": 230,
+            "column": 1
+          },
+          "end": {
+            "line": 230,
+            "column": 80
+          }
+        }
+      },
+      "severity": "WARNING",
+      "code": {
+        "value": "performance/client-reuse",
+        "url": "https://pkg.go.dev/github.com/google/go-github#hdr-Client_Usage"
+      },
+      "suggestions": [
+        {
+          "text": "// Consider implementing client pooling or reuse\n// Create client pool during server initialization\n// and reuse clients from the pool in processPullRequestEvent"
+        }
+      ]
+    },
+    {
+      "message": "WORKFLOW_INPUTS environment variable parsing doesn't handle quoted values with commas",
+      "location": {
+        "path": "pr-cli/pkg/config/webhook.go",
+        "range": {
+          "start": {
+            "line": 180,
+            "column": 1
+          },
+          "end": {
+            "line": 180,
+            "column": 80
+          }
+        }
+      },
+      "severity": "WARNING",
+      "code": {
+        "value": "bug/parsing",
+        "url": "https://github.com/kelseyhightower/envconfig#handling-complex-types"
+      },
+      "suggestions": [
+        {
+          "text": "// Use a more robust parsing approach\nif workflowInputs := os.Getenv(\"WORKFLOW_INPUTS\"); workflowInputs != \"\" {\n    wc.WorkflowInputs = make(map[string]string)\n    // Use proper CSV parsing that handles quoted values\n    r := csv.NewReader(strings.NewReader(workflowInputs))\n    records, err := r.ReadAll()\n    if err == nil && len(records) > 0 {\n        for _, record := range records[0] {\n            kv := strings.SplitN(record, \"=\", 2)\n            if len(kv) == 2 {\n                wc.WorkflowInputs[kv[0]] = kv[1]\n            }\n        }\n    }\n}"
+        }
+      ]
+    },
+    {
+      "message": "Draft PR handling could be enhanced with configuration options",
+      "location": {
+        "path": "pr-cli/pkg/webhook/parser.go",
+        "range": {
+          "start": {
+            "line": 245,
+            "column": 1
+          },
+          "end": {
+            "line": 245,
+            "column": 80
+          }
+        }
+      },
+      "severity": "INFO",
+      "code": {
+        "value": "refactor/configurability",
+        "url": "https://12factor.net/config"
+      },
+      "suggestions": [
+        {
+          "text": "// Add configuration option to control draft PR behavior\n// Skip draft PRs unless action is ready_for_review OR config allows drafts\nif ghPayload.PullRequest.Draft && ghPayload.Action != \"ready_for_review\" && !config.AllowDraftPRs {\n    return nil, fmt.Errorf(\"skipping draft PR\")\n}"
+        }
+      ]
+    },
+    {
+      "message": "Add section explaining workflow dispatch failure handling and retry mechanisms",
+      "location": {
+        "path": "pr-cli/docs/webhook-usage.md",
+        "range": {
+          "start": {
+            "line": 320,
+            "column": 1
+          },
+          "end": {
+            "line": 320,
+            "column": 80
+          }
+        }
+      },
+      "severity": "INFO",
+      "code": {
+        "value": "docs/missing",
+        "url": "https://documentation.divio.com/"
+      },
+      "suggestions": [
+        {
+          "text": "## Error Handling and Retries\n\n### Workflow Dispatch Failures\n\nWhen workflow dispatches fail, the webhook service will:\n- Log the error with detailed information\n- Return a 500 status code to GitHub\n- Increment the error counter metric\n\n### Retry Mechanism\n\nGitHub will automatically retry failed webhook deliveries:\n- Initial retry after 1 minute\n- Subsequent retries with exponential backoff\n- Maximum of 3 retries\n\n### Monitoring Failures\n\nMonitor these metrics for failures:\n- `pr_cli_workflow_dispatch_total{status=\"error\"}`\n- `pr_cli_pr_event_total{status=\"error\"}`\n\nSet up alerts when error rates exceed thresholds."
+        }
+      ]
+    },
+    {
+      "message": "Consider adding histogram metric for workflow dispatch duration",
+      "location": {
+        "path": "pr-cli/pkg/webhook/metrics.go",
+        "range": {
+          "start": {
+            "line": 70,
+            "column": 1
+          },
+          "end": {
+            "line": 70,
+            "column": 80
+          }
+        }
+      },
+      "severity": "INFO",
+      "code": {
+        "value": "refactor/monitoring",
+        "url": "https://prometheus.io/docs/practices/histograms/"
+      },
+      "suggestions": [
+        {
+          "text": "// Add workflow dispatch duration histogram\nvar WorkflowDispatchDuration = promauto.NewHistogramVec(\n    prometheus.HistogramOpts{\n        Name:    \"pr_cli_workflow_dispatch_duration_seconds\",\n        Help:    \"Duration of workflow dispatch operations\",\n        Buckets: prometheus.DefBuckets,\n    },\n    []string{\"platform\", \"workflow\"},\n)"
+        }
+      ]
+    },
+    {
+      "message": "Add comments explaining the relationship between PR_EVENT_ENABLED and WORKFLOW_FILE requirements",
+      "location": {
+        "path": "pr-cli/deploy/base/configmap.yaml",
+        "range": {
+          "start": {
+            "line": 25,
+            "column": 1
+          },
+          "end": {
+            "line": 25,
+            "column": 80
+          }
+        }
+      },
+      "severity": "INFO",
+      "code": {
+        "value": "docs/clarification",
+        "url": "https://kubernetes.io/docs/concepts/configuration/configmap/"
+      },
+      "suggestions": [
+        {
+          "text": "  # Pull Request Event Handling\n  # NOTE: WORKFLOW_FILE is REQUIRED when PR_EVENT_ENABLED is true\n  # The service will fail to start if PR_EVENT_ENABLED=true without WORKFLOW_FILE\n  PR_EVENT_ENABLED: \"false\"\n  PR_EVENT_ACTIONS: \"opened,synchronize,reopened,ready_for_review,edited\"\n  # WORKFLOW_FILE: \".github/workflows/pr-check.yml\"  # Required if PR_EVENT_ENABLED is true\n  WORKFLOW_REF: \"main\"\n  # WORKFLOW_INPUTS: \"key1=value1,key2=value2\"  # Optional static inputs"
+        }
+      ]
+    }
+  ]
+}
