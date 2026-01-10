@@ -92,7 +92,7 @@ Write a JSON file with an array of review comments in reviewdog rdjson format:
 ```json
 {
   "source": {
-    "name": "claude-code-review",
+    "name": "ai-code-review",
     "url": "https://github.com/alaudadevops/run-actions"
   },
   "diagnostics": [
