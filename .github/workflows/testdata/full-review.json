@@ -45,8 +45,7 @@
           }
         }
       },
-      "severity": "WARNING",
-      }
+      "severity": "WARNING"
     },
     {
       "message": "Add metrics for workflow input merging operations to track how often static inputs override dynamic ones.",
