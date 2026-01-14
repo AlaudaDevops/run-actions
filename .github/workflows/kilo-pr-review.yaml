@@ -55,7 +55,7 @@ env:
   INLINE_COMMENT_MARKER: "<!-- ai-code-review-inline -->"
   SHARED_PROMPT_PATH: ".github/prompts/code-review.md"
   PERSONALIZED_PROMPT_PATH: ".github/prompts/pr-review.md"
-  AI_MODEL: "kwaipilot/kat-coder-pro:free"
+  AI_MODEL: "mistralai/devstral-2512:free"
 
 jobs:
   review-pr:
