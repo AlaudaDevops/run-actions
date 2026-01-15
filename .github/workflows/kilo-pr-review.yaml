@@ -377,13 +377,13 @@ jobs:
             COMMENT_COUNT=0
           fi
 
-          NUMBER_OF_CRITICAL_ISSUES=$(jq '[.diagnostics[] | select(.severity | IN("WARNING","CRITICAL","ERROR"))] | length' ../review_comments.json)
+          NUMBER_OF_CRITICAL_ISSUES=$(jq '[.diagnostics[] | select(.severity | IN("CRITICAL","ERROR"))] | length' ../review_comments.json)
 
 
           echo "✅ Kilo review completed"
           echo "📄 Review output saved ($(wc -l < ../review_output.md) lines)"
           echo "comment_count=$COMMENT_COUNT" >> $GITHUB_OUTPUT
-          echo "warning_count=$NUMBER_OF_CRITICAL_ISSUES" >> $GITHUB_OUTPUT
+          echo "error_count=$NUMBER_OF_CRITICAL_ISSUES" >> $GITHUB_OUTPUT
           echo "has_overview=$HAS_OVERVIEW" >> $GITHUB_OUTPUT
           echo "has_comments=$HAS_COMMENTS" >> $GITHUB_OUTPUT
 
@@ -559,7 +559,7 @@ jobs:
           REVIEW_STYLE="${{ inputs.review_style }}"
           HAS_PERSONALIZED="${{ steps.personalized-prompt.outputs.has_personalized }}"
           COMMENT_COUNT="${{ steps.kilo-review.outputs.comment_count }}"
-          WARNING_COUNT="${{ steps.kilo-review.outputs.warning_count }}"
+          ERROR_COUNT="${{ steps.kilo-review.outputs.error_count }}"
           MARKER="${{ env.REVIEW_COMMENT_MARKER }}"
           WORKFLOW_URL="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
 
@@ -576,7 +576,7 @@ jobs:
           | **Model** | \`$MODEL\` |
           | **Style** | $REVIEW_STYLE |
           | **Issues Found** | $COMMENT_COUNT |
-          | **Warnings/Errors** | $WARNING_COUNT |
+          | **Warnings/Errors** | $ERROR_COUNT |
           | **Personalized Prompt** | $([ "$HAS_PERSONALIZED" = "true" ] && echo "✅ Yes" || echo "❌ No") |
           | **Reviewed at** | $(date -u +"%Y-%m-%d %H:%M:%S UTC") |
 
@@ -620,19 +620,19 @@ jobs:
           REPO="${{ inputs.repository }}"
           HEAD_SHA="${{ steps.validate-pr.outputs.head_sha }}"
           COMMENT_COUNT="${{ steps.kilo-review.outputs.comment_count }}"
-          WARNING_COUNT="${{ steps.kilo-review.outputs.warning_count }}"
+          ERROR_COUNT="${{ steps.kilo-review.outputs.error_count }}"
 
           WORKFLOW_URL="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
 
           echo "📝 Updating commit status for $HEAD_SHA..."
 
           # Determine state based on comment count
-          if [ -z "$WARNING_COUNT" ] || [ "$WARNING_COUNT" = "0" ]; then
+          if [ -z "$ERROR_COUNT" ] || [ "$ERROR_COUNT" = "0" ]; then
             STATE="success"
             DESCRIPTION="No issues found"
           else
             STATE="failure"
-            DESCRIPTION="Found $WARNING_COUNT warning or error issue(s)"
+            DESCRIPTION="Found $ERROR_COUNT critical issue(s)"
           fi
 
           # Check if the review step failed
