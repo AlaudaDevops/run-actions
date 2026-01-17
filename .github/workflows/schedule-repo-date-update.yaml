@@ -1,0 +1,27 @@
+name: Scheduled date update in repo
+on:
+  schedule:
+    # all input default values should be added into the workflow directly
+    # https://stackoverflow.com/questions/72539900/schedule-trigger-github-action-workflow-with-input-parameters
+    - cron: "0 4 * * MON"
+
+  workflow_dispatch: {}
+
+jobs:
+  scheduled-update:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4 # https://github.com/marketplace/actions/checkout
+        with:
+          token: ${{ secrets.TOKEN }}
+      - name: Run script
+        run: |
+          TODAY=$(date +"%Y-%m-%d")
+          echo $TODAY > .github/updated.dat
+
+          git config --global user.email "alaudabot@alauda.io"
+          git config --global user.name "Alaudabot"
+
+          git add .github/updated.dat
+          git commit -am "up: Weekly update on $TODAY"
+          git push
