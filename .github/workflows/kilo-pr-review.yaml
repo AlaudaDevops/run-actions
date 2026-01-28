@@ -316,7 +316,7 @@ jobs:
         run: |
           echo "🤖 Starting Kilo code review..."
 
-          kilocode --auto --timeout 600 "$(cat ../review_prompt.md)" | tee ../kilo_output.log
+          kilocode --auto --timeout 600 --append-system-prompt-file ../review_prompt.md "Review this PR according to the guidelines in the system prompt" | tee ../kilo_output.log
 
           COMMENT_COUNT=0
           HAS_OVERVIEW=false
