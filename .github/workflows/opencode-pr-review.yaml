@@ -1,0 +1,332 @@
+name: AI PR Review (OpenCode)
+
+on:
+  workflow_dispatch:
+    inputs:
+      repository:
+        description: "Repository to review (owner/repo format)"
+        required: true
+        type: string
+      pr_number:
+        description: "Pull request number to review"
+        required: true
+        type: string
+      pr_event_payload:
+        description: "Optional: JSON payload from pull_request event"
+        required: false
+        type: string
+      review_style:
+        description: "Review style (strict, balanced, lenient)"
+        required: false
+        default: "balanced"
+        type: string
+      dry_run:
+        description: "Dry run mode (output review but don't post comments)"
+        required: false
+        default: false
+        type: boolean
+
+  workflow_call:
+    inputs:
+      repository:
+        description: "Repository to review (owner/repo format)"
+        required: true
+        type: string
+      pr_number:
+        description: "Pull request number to review"
+        required: true
+        type: string
+      pr_event_payload:
+        description: "Optional: JSON payload from pull_request event"
+        required: false
+        type: string
+      review_style:
+        description: "Review style (strict, balanced, lenient)"
+        required: false
+        default: "balanced"
+        type: string
+      dry_run:
+        description: "Dry run mode (output review but don't post comments)"
+        required: false
+        default: false
+        type: boolean
+    secrets:
+      TOKEN:
+        description: "GitHub token with repo access"
+        required: true
+      OPENCODE_API_KEY:
+        description: "API key for the AI provider (e.g., Anthropic API key)"
+        required: true
+
+env:
+  # Configure your model here - format: provider/model
+  AI_MODEL: "anthropic/claude-sonnet-4-20250514"
+
+jobs:
+  review-pr:
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+      pull-requests: write
+      issues: write
+
+    steps:
+      - name: Checkout run-actions repo
+        uses: actions/checkout@v4
+        with:
+          path: run-actions
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+
+      - name: Install GitHub CLI
+        uses: dev-hanz-ops/install-gh-cli-action@v0.2.1
+        with:
+          gh-cli-version: 2.81.0
+
+      - name: Auth with GitHub CLI
+        run: |
+          echo -n "${{ secrets.TOKEN }}" | gh auth login --with-token
+          echo "✅ GitHub CLI authenticated"
+
+      - name: Validate PR exists
+        id: validate-pr
+        run: |
+          REPO="${{ inputs.repository }}"
+          PR_NUMBER="${{ inputs.pr_number }}"
+
+          echo "🔍 Validating PR #$PR_NUMBER in $REPO..."
+
+          # Get PR details
+          PR_DATA=$(gh pr view "$PR_NUMBER" --repo "$REPO" --json number,title,state,headRefName,baseRefName,author,additions,deletions,changedFiles,headRefOid 2>&1) || {
+            echo "❌ Failed to fetch PR #$PR_NUMBER from $REPO"
+            echo "Error: $PR_DATA"
+            exit 1
+          }
+
+          echo "$PR_DATA" | jq .
+
+          # Check if PR is open
+          PR_STATE=$(echo "$PR_DATA" | jq -r '.state')
+          if [ "$PR_STATE" != "OPEN" ]; then
+            echo "⚠️ PR #$PR_NUMBER is not open (state: $PR_STATE). Skipping review."
+            echo "skip=true" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          # Extract PR info for later use
+          echo "pr_title=$(echo "$PR_DATA" | jq -r '.title')" >> $GITHUB_OUTPUT
+          echo "pr_author=$(echo "$PR_DATA" | jq -r '.author.login')" >> $GITHUB_OUTPUT
+          echo "head_branch=$(echo "$PR_DATA" | jq -r '.headRefName')" >> $GITHUB_OUTPUT
+          echo "base_branch=$(echo "$PR_DATA" | jq -r '.baseRefName')" >> $GITHUB_OUTPUT
+          echo "additions=$(echo "$PR_DATA" | jq -r '.additions')" >> $GITHUB_OUTPUT
+          echo "deletions=$(echo "$PR_DATA" | jq -r '.deletions')" >> $GITHUB_OUTPUT
+          echo "changed_files=$(echo "$PR_DATA" | jq -r '.changedFiles')" >> $GITHUB_OUTPUT
+          echo "head_sha=$(echo "$PR_DATA" | jq -r '.headRefOid')" >> $GITHUB_OUTPUT
+          echo "skip=false" >> $GITHUB_OUTPUT
+
+          echo "✅ PR validated successfully"
+
+      - name: Set commit status (pending)
+        if: steps.validate-pr.outputs.skip != 'true' && inputs.dry_run != true
+        run: |
+          REPO="${{ inputs.repository }}"
+          HEAD_SHA="${{ steps.validate-pr.outputs.head_sha }}"
+          WORKFLOW_URL="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+
+          echo "📝 Setting commit status to pending for $HEAD_SHA..."
+
+          gh api "repos/$REPO/statuses/$HEAD_SHA" \
+            --method POST \
+            -f state="pending" \
+            -f target_url="$WORKFLOW_URL" \
+            -f description="AI Code Review in progress..." \
+            -f context="AI Code Review (OpenCode)" || {
+            echo "⚠️ Failed to set commit status"
+          }
+
+          echo "✅ Commit status set to pending"
+
+      - name: Clone target repository
+        if: steps.validate-pr.outputs.skip != 'true'
+        run: |
+          REPO="${{ inputs.repository }}"
+          PR_NUMBER="${{ inputs.pr_number }}"
+
+          echo "📦 Cloning $REPO..."
+          gh repo clone "$REPO" target-repo
+          cd target-repo
+          gh pr checkout $PR_NUMBER
+          echo "✅ Repository cloned and PR checked out"
+
+      - name: Prepare review prompt
+        if: steps.validate-pr.outputs.skip != 'true'
+        run: |
+          REPO="${{ inputs.repository }}"
+          PR_NUMBER="${{ inputs.pr_number }}"
+          PR_TITLE="${{ steps.validate-pr.outputs.pr_title }}"
+          REVIEW_STYLE="${{ inputs.review_style }}"
+
+          # Create a concise review prompt
+          cat > review_prompt.txt << 'EOF'
+          Review this pull request and provide specific, actionable feedback.
+
+          Focus on:
+          - Code quality and best practices
+          - Potential bugs or logical errors
+          - Security concerns
+          - Performance issues
+          - Maintainability and readability
+
+          EOF
+
+          # Add review style guidance
+          case "$REVIEW_STYLE" in
+            strict)
+              cat >> review_prompt.txt << 'EOF'
+          Be thorough and strict in your review. Flag any deviation from best practices.
+          EOF
+              ;;
+            balanced)
+              cat >> review_prompt.txt << 'EOF'
+          Balance thoroughness with pragmatism. Focus on significant issues.
+          EOF
+              ;;
+            lenient)
+              cat >> review_prompt.txt << 'EOF'
+          Focus only on critical issues and obvious improvements.
+          EOF
+              ;;
+          esac
+
+          cat >> review_prompt.txt << 'EOF'
+
+          When you identify issues:
+          - Comment directly on the relevant lines of code
+          - Be specific about what needs to change and why
+          - Provide concrete suggestions or code examples when helpful
+          - Prioritize your feedback (critical issues first)
+
+          Provide a summary comment on the PR with:
+          - Overall assessment
+          - Key issues found (if any)
+          - Positive aspects of the changes
+          EOF
+
+          echo "✅ Review prompt prepared"
+          cat review_prompt.txt
+          echo "---"
+
+      - name: Load review prompt
+        if: steps.validate-pr.outputs.skip != 'true' && inputs.dry_run != true
+        id: load-prompt
+        run: |
+          # Use GitHub Actions output with EOF delimiter for multiline
+          {
+            echo "prompt_content<<EOF"
+            cat review_prompt.txt
+            echo "EOF"
+          } >> $GITHUB_OUTPUT
+
+      - name: Run OpenCode review
+        if: steps.validate-pr.outputs.skip != 'true' && inputs.dry_run != true
+        working-directory: target-repo
+        uses: anomalyco/opencode/github@latest
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.OPENCODE_API_KEY }}
+          GITHUB_TOKEN: ${{ secrets.TOKEN }}
+        with:
+          model: ${{ env.AI_MODEL }}
+          use_github_token: true
+          prompt: ${{ steps.load-prompt.outputs.prompt_content }}
+
+      - name: Simulate review (dry run)
+        if: steps.validate-pr.outputs.skip != 'true' && inputs.dry_run == true
+        run: |
+          echo "🔍 DRY RUN MODE"
+          echo "================================"
+          echo "Would run OpenCode review with:"
+          echo "  Model: ${{ env.AI_MODEL }}"
+          echo "  Repository: ${{ inputs.repository }}"
+          echo "  PR: #${{ inputs.pr_number }}"
+          echo "  Review Style: ${{ inputs.review_style }}"
+          echo ""
+          echo "Prompt:"
+          cat review_prompt.txt
+          echo "================================"
+
+      - name: Update commit status (success)
+        if: steps.validate-pr.outputs.skip != 'true' && inputs.dry_run != true && success()
+        run: |
+          REPO="${{ inputs.repository }}"
+          HEAD_SHA="${{ steps.validate-pr.outputs.head_sha }}"
+          WORKFLOW_URL="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+
+          echo "📝 Updating commit status to success..."
+
+          gh api "repos/$REPO/statuses/$HEAD_SHA" \
+            --method POST \
+            -f state="success" \
+            -f target_url="$WORKFLOW_URL" \
+            -f description="AI Code Review completed" \
+            -f context="AI Code Review (OpenCode)" || {
+            echo "⚠️ Failed to update commit status"
+          }
+
+          echo "✅ Commit status updated"
+
+      - name: Update commit status (failure)
+        if: steps.validate-pr.outputs.skip != 'true' && inputs.dry_run != true && failure()
+        run: |
+          REPO="${{ inputs.repository }}"
+          HEAD_SHA="${{ steps.validate-pr.outputs.head_sha }}"
+          WORKFLOW_URL="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+
+          echo "📝 Updating commit status to failure..."
+
+          gh api "repos/$REPO/statuses/$HEAD_SHA" \
+            --method POST \
+            -f state="error" \
+            -f target_url="$WORKFLOW_URL" \
+            -f description="AI Code Review failed" \
+            -f context="AI Code Review (OpenCode)" || {
+            echo "⚠️ Failed to update commit status"
+          }
+
+      - name: Generate step summary
+        if: always()
+        run: |
+          REPO="${{ inputs.repository }}"
+          PR_NUMBER="${{ inputs.pr_number }}"
+          SKIP="${{ steps.validate-pr.outputs.skip }}"
+          DRY_RUN="${{ inputs.dry_run }}"
+          MODEL="${{ env.AI_MODEL }}"
+          REVIEW_STYLE="${{ inputs.review_style }}"
+
+          cat >> $GITHUB_STEP_SUMMARY << EOF
+          # AI PR Review Summary (OpenCode)
+
+          | Property | Value |
+          |----------|-------|
+          | **Repository** | [$REPO](https://github.com/$REPO) |
+          | **PR** | [#$PR_NUMBER](https://github.com/$REPO/pull/$PR_NUMBER) |
+          | **Model** | \`$MODEL\` |
+          | **Style** | $REVIEW_STYLE |
+          | **Status** | $([ "$SKIP" = "true" ] && echo "⏭️ Skipped (PR not open)" || [ "$DRY_RUN" = "true" ] && echo "🔍 Dry Run" || echo "✅ Completed") |
+
+          EOF
+
+          if [ "$SKIP" != "true" ] && [ "$DRY_RUN" != "true" ]; then
+            echo "## Review Details" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "OpenCode has reviewed the pull request and posted comments directly on the PR." >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "View the review at: https://github.com/$REPO/pull/$PR_NUMBER" >> $GITHUB_STEP_SUMMARY
+          elif [ "$DRY_RUN" = "true" ]; then
+            echo "## Dry Run Mode" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "This was a dry run. No comments were posted." >> $GITHUB_STEP_SUMMARY
+          fi

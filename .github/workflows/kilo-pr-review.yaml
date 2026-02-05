@@ -56,7 +56,7 @@ env:
   SHARED_PROMPT_PATH: ".github/prompts/code-review.md"
   PERSONALIZED_PROMPT_PATH: ".github/prompts/pr-review.md"
   #AI_MODEL: "mistralai/devstral-2512:free"
-  AI_MODEL: "moonshotai/kimi-k2.5:free"
+  AI_MODEL: "z-ai/glm-4.7:free"
 
 jobs:
   review-pr:
@@ -286,7 +286,7 @@ jobs:
         run: |
           mkdir -p ~/.kilocode/cli
 
-          # Configure Kilo CLI with API key
+          # Configure Kilo CLI with API key (newest 1.0.x syntax)
           cat > ~/.kilocode/cli/config.json << EOF
           {
             "version": "1.0.0",
@@ -316,7 +316,7 @@ jobs:
         run: |
           echo "🤖 Starting Kilo code review..."
 
-          kilocode --auto --timeout 600 --append-system-prompt-file ../review_prompt.md "Review this PR according to the guidelines in the system prompt" | tee ../kilo_output.log
+          kilo run --auto --file ../review_prompt.md "Review this PR according to guidelines in the attached file" | tee ../kilo_output.log
 
           COMMENT_COUNT=0
           HAS_OVERVIEW=false
