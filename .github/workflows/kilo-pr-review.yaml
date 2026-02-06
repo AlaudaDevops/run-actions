@@ -318,7 +318,7 @@ jobs:
 
           echo "🤖 Starting Kilo code review..."
 
-          kilo run --thinking --model $AI_MODEL --auto --file ../review_prompt.md "Review this PR according to the guidelines in the system prompt" | tee ../kilo_output.log
+          echo "Review this PR according to the guidelines in the system prompt" | kilo run --auto --file ../review_prompt.md | tee ../kilo_output.log
           KILO_EXIT_CODE=${PIPESTATUS[0]}
 
           COMMENT_COUNT=0
