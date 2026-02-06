@@ -314,9 +314,12 @@ jobs:
         id: kilo-review
         working-directory: target-repo
         run: |
+          set -euo pipefail
+
           echo "🤖 Starting Kilo code review..."
 
-          kilo run --auto --file ../review_prompt.md "Review this PR according to guidelines in the attached file" | tee ../kilo_output.log
+          kilo run --thinking --model $AI_MODEL --auto --file ../review_prompt.md "Review this PR according to the guidelines in the system prompt" | tee ../kilo_output.log
+          KILO_EXIT_CODE=${PIPESTATUS[0]}
 
           COMMENT_COUNT=0
           HAS_OVERVIEW=false
@@ -379,6 +382,16 @@ jobs:
           fi
 
           NUMBER_OF_CRITICAL_ISSUES=$(jq '[.diagnostics[] | select(.severity | IN("CRITICAL","ERROR"))] | length' ../review_comments.json)
+
+          if [ "$KILO_EXIT_CODE" -ne 0 ]; then
+            echo "❌ Kilo CLI exited with status $KILO_EXIT_CODE"
+            exit "$KILO_EXIT_CODE"
+          fi
+
+          if [ "$HAS_OVERVIEW" != "true" ] && [ "$HAS_COMMENTS" != "true" ]; then
+            echo "❌ Kilo produced no outputs (overview or comments)"
+            exit 1
+          fi
 
 
           echo "✅ Kilo review completed"
