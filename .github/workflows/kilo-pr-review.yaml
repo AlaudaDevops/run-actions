@@ -65,6 +65,8 @@ env:
   PERSONALIZED_PROMPT_PATH: ".github/prompts/pr-review.md"
   #AI_MODEL: "mistralai/devstral-2512:free"
   AI_MODEL: "z-ai/glm-4.7:free"
+  OPENCODE_MODEL: "opencode/minimax-m2.1-free"
+  USE_OPENCODE: "true"
 
 jobs:
   review-pr:
@@ -152,10 +154,19 @@ jobs:
           echo "✅ Commit status set to pending"
 
       - name: Install Kilo CLI
-        if: steps.validate-pr.outputs.skip != 'true'
+        if: steps.validate-pr.outputs.skip != 'true' && env.USE_OPENCODE != 'true'
         run: |
           npm install -g @kilocode/cli
           echo "✅ Kilo CLI installed: $(kilocode --version || echo 'version check not supported')"
+
+      - name: Install OpenCode CLI
+        if: steps.validate-pr.outputs.skip != 'true' && env.USE_OPENCODE == 'true'
+        run: |
+          set -euo pipefail
+          mkdir -p "$HOME/.local/bin"
+          curl -fsSL https://opencode.ai/install | OPENCODE_INSTALL_DIR="$HOME/.local/bin" bash
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          opencode --version
 
       - name: Clone target repository
         if: steps.validate-pr.outputs.skip != 'true'
@@ -290,7 +301,7 @@ jobs:
           echo "----"
 
       - name: Configure Kilo CLI
-        if: steps.validate-pr.outputs.skip != 'true'
+        if: steps.validate-pr.outputs.skip != 'true' && env.USE_OPENCODE != 'true'
         run: |
           mkdir -p ~/.kilocode/cli
 
@@ -317,16 +328,20 @@ jobs:
 
           echo "✅ Kilo CLI configured"
 
-      - name: Run Kilo review
+      - name: Run AI review
         if: steps.validate-pr.outputs.skip != 'true'
         id: kilo-review
         working-directory: target-repo
         run: |
           set -euo pipefail
 
-          echo "🤖 Starting Kilo code review..."
+          echo "🤖 Starting AI code review..."
 
-          echo "Review this PR according to the guidelines in the system prompt" | kilo run --model $AI_MODEL --auto --file ../review_prompt.md | tee ../kilo_output.log
+          if [ -f "$(which kilo)" ]; then
+            echo "Review this PR according to the guidelines in the system prompt" | kilo run --model $AI_MODEL --auto --file ../review_prompt.md | tee ../kilo_output.log
+          else
+            echo "Review this PR according to the guidelines in the system prompt" | opencode run --model $OPENCODE_MODEL --file ../review_prompt.md | tee ../kilo_output.log
+          fi
           KILO_EXIT_CODE=${PIPESTATUS[0]}
 
           COMMENT_COUNT=0
