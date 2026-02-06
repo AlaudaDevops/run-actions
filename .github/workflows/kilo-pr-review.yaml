@@ -159,14 +159,39 @@ jobs:
           npm install -g @kilocode/cli
           echo "✅ Kilo CLI installed: $(kilocode --version || echo 'version check not supported')"
 
-      - name: Install OpenCode CLI
+      # - name: Install OpenCode CLI
+      #   if: steps.validate-pr.outputs.skip != 'true' && env.USE_OPENCODE == 'true'
+      #   run: |
+      #     set -euo pipefail
+      #     mkdir -p "$HOME/.local/bin"
+      #     curl -fsSL https://opencode.ai/install | OPENCODE_INSTALL_DIR="$HOME/.local/bin" bash
+      #     echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      #     opencode --version
+      - name: Get opencode version
         if: steps.validate-pr.outputs.skip != 'true' && env.USE_OPENCODE == 'true'
+        id: version
+        shell: bash
         run: |
-          set -euo pipefail
-          mkdir -p "$HOME/.local/bin"
-          curl -fsSL https://opencode.ai/install | OPENCODE_INSTALL_DIR="$HOME/.local/bin" bash
-          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
-          opencode --version
+          VERSION=$(curl -sf https://api.github.com/repos/anomalyco/opencode/releases/latest | grep -o '"tag_name": *"[^"]*"' | cut -d'"' -f4)
+          echo "version=${VERSION:-latest}" >> $GITHUB_OUTPUT
+
+      - name: Cache opencode
+        if: steps.validate-pr.outputs.skip != 'true' && env.USE_OPENCODE == 'true'
+        id: cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.opencode/bin
+          key: opencode-${{ runner.os }}-${{ runner.arch }}-${{ steps.version.outputs.version }}
+
+      - name: Install opencode
+        if: steps.cache.outputs.cache-hit != 'true' && steps.validate-pr.outputs.skip != 'true' && env.USE_OPENCODE == 'true'
+        shell: bash
+        run: curl -fsSL https://opencode.ai/install | bash
+
+      - name: Add opencode to PATH
+        if: steps.validate-pr.outputs.skip != 'true' && env.USE_OPENCODE == 'true'
+        shell: bash
+        run: echo "$HOME/.opencode/bin" >> $GITHUB_PATH
 
       - name: Clone target repository
         if: steps.validate-pr.outputs.skip != 'true'
