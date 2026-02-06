@@ -7,14 +7,6 @@ on:
         description: "Repository to review (owner/repo format)"
         required: true
         type: string
-      model:
-        description: "Override model (provider/model). Defaults to OPENCODE_MODEL."
-        required: false
-        type: string
-      prompt:
-        description: "Override review prompt. Defaults to OPENCODE_REVIEW_PROMPT."
-        required: false
-        type: string
       pr_number:
         description: "Pull request number to review"
         required: true
@@ -24,6 +16,23 @@ on:
         required: false
         default: "strict"
         type: string
+      event_payload:
+        description: "Pull request event payload"
+        required: true
+        type: string
+      model:
+        description: "Override model (provider/model). Defaults to OPENCODE_MODEL."
+        required: false
+        type: string
+      prompt:
+        description: "Override review prompt. Defaults to OPENCODE_REVIEW_PROMPT."
+        required: false
+        type: string
+      dry_run:
+        description: "Dry run mode (output review but don't post comments)"
+        required: false
+        default: false
+        type: boolean
     secrets:
       OPENCODE_GITHUB_TOKEN:
         description: "Optional token for API calls; defaults to GITHUB_TOKEN"

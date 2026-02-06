@@ -16,6 +16,10 @@ on:
         required: false
         default: "strict"
         type: string
+      event_payload:
+        description: "Pull request event payload"
+        required: false
+        type: string
       dry_run:
         description: "Dry run mode (output review but don't post comments)"
         required: false
@@ -36,6 +40,10 @@ on:
         description: "Review style (strict, balanced, lenient)"
         required: false
         default: "strict"
+        type: string
+      event_payload:
+        description: "Pull request event payload"
+        required: false
         type: string
       dry_run:
         description: "Dry run mode (output review but don't post comments)"
@@ -318,7 +326,7 @@ jobs:
 
           echo "🤖 Starting Kilo code review..."
 
-          echo "Review this PR according to the guidelines in the system prompt" | kilo run --auto --file ../review_prompt.md | tee ../kilo_output.log
+          echo "Review this PR according to the guidelines in the system prompt" | kilo run --model $AI_MODEL --auto --file ../review_prompt.md | tee ../kilo_output.log
           KILO_EXIT_CODE=${PIPESTATUS[0]}
 
           COMMENT_COUNT=0
