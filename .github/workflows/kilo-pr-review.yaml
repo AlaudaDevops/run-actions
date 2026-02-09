@@ -361,7 +361,7 @@ jobs:
           mkdir -p ~/.config/opencode
 
           # Configure Opencode CLI with API key (newest 1.0.x syntax)
-          cat > ~/.config/opencode/opencode.json << EOF
+          cat > ~/.config/opencode/opencode.json << 'EOF'
           {
             "$schema": "https://opencode.ai/config.json",
             "permission": {
