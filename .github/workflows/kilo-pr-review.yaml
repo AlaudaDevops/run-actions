@@ -65,7 +65,8 @@ env:
   PERSONALIZED_PROMPT_PATH: ".github/prompts/pr-review.md"
   #AI_MODEL: "mistralai/devstral-2512:free"
   AI_MODEL: "z-ai/glm-4.7:free"
-  OPENCODE_MODEL: "opencode/minimax-m2.1-free"
+  # OPENCODE_MODEL: "opencode/minimax-m2.1-free"
+  OPENCODE_MODEL: "opencode/kimi-k2.5-free"
   USE_OPENCODE: "true"
 
 jobs:
@@ -347,6 +348,41 @@ jobs:
             ],
             "autoApproval": {
               "enabled": true
+            }
+          }
+          EOF
+
+          echo "✅ Kilo CLI configured"
+
+      - name: Configure Opencode CLI
+        if: steps.validate-pr.outputs.skip != 'true' && env.USE_OPENCODE == 'true'
+        run: |
+          mkdir -p ~/.config/opencode
+
+          # Configure Opencode CLI with API key (newest 1.0.x syntax)
+          cat > ~/.config/opencode/opencode.json << EOF
+          {
+            "$schema": "https://opencode.ai/config.json",
+            "permission": {
+              "read": "allow",
+              "edit": "allow",
+              "glob": "allow",
+              "grep": "allow",
+              "list": "allow",
+              "bash": "allow",
+              "task": "allow",
+              "external_directory": "allow",
+              "todowrite": "allow",
+              "todoread": "allow",
+              "question": "allow",
+              "webfetch": "allow",
+              "websearch": "allow",
+              "codesearch": "allow",
+              "lsp": "allow",
+              "doom_loop": "allow",
+              "write": "allow",
+              "skill": "allow",
+              "*": "allow"
             }
           }
           EOF
