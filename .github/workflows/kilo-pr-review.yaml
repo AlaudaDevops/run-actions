@@ -65,6 +65,7 @@ env:
   PERSONALIZED_PROMPT_PATH: ".github/prompts/pr-review.md"
   #AI_MODEL: "mistralai/devstral-2512:free"
   AI_MODEL: "z-ai/glm-4.7:free"
+  ## Keeping for easier switch in the future
   # OPENCODE_MODEL: "opencode/minimax-m2.1-free"
   OPENCODE_MODEL: "opencode/kimi-k2.5-free"
   USE_OPENCODE: "true"
@@ -381,13 +382,12 @@ jobs:
               "lsp": "allow",
               "doom_loop": "allow",
               "write": "allow",
-              "skill": "allow",
-              "*": "allow"
+              "skill": "allow"
             }
           }
           EOF
 
-          echo "✅ Kilo CLI configured"
+          echo "✅ Opencode configured"
 
       - name: Run AI review
         if: steps.validate-pr.outputs.skip != 'true'
