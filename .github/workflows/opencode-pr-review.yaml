@@ -70,7 +70,7 @@ on:
 
 env:
   # Fast tweak: update this model string to switch providers/models.
-  OPENCODE_MODEL: "opencode/minimax-m2.1-free"
+  OPENCODE_MODEL: "opencode/minimax-m2.5-free"
   # Simple default review prompt.
   OPENCODE_REVIEW_PROMPT: "Review this pull request for correctness, security, and maintainability. Provide a concise summary and add inline comments for actionable issues. You can use the gh cli to post/update your comments in the PR"
 

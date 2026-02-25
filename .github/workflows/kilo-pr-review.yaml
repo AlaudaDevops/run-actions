@@ -67,7 +67,7 @@ env:
   AI_MODEL: "z-ai/glm-4.7:free"
   ## Keeping for easier switch in the future
   # OPENCODE_MODEL: "opencode/minimax-m2.1-free"
-  OPENCODE_MODEL: "opencode/kimi-k2.5-free"
+  OPENCODE_MODEL: "opencode/minimax-m2.5-free"
   USE_OPENCODE: "true"
 
 jobs:
@@ -771,7 +771,8 @@ jobs:
           SKIP="${{ steps.validate-pr.outputs.skip }}"
           DRY_RUN="${{ inputs.dry_run }}"
           COMMENT_COUNT="${{ steps.kilo-review.outputs.comment_count }}"
-          MODEL="$AI_MODEL"
+          MODEL="$OPENCODE_MODEL"
+
           REVIEW_STYLE="${{ inputs.review_style }}"
 
           cat >> $GITHUB_STEP_SUMMARY << EOF
