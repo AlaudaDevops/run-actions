@@ -65,7 +65,7 @@ env:
   REVIEW_COMMENT_MARKER: "<!-- kilo-pr-review-comment -->"
   SHARED_PROMPT_PATH: ".github/prompts/code-review.md"
   PERSONALIZED_PROMPT_PATH: ".github/prompts/pr-review.md"
-  OPENCODE_MODEL: "openai/gpt-5.3-codex"
+  OPENCODE_MODEL: "codex/gpt-5.3-codex"
 
 jobs:
   review-pr:
