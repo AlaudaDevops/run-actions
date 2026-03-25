@@ -34,6 +34,12 @@ on:
         default: false
         type: boolean
     secrets:
+      OPENAI_BASEURL:
+        description: "Optional base url for API calls with OpenAI models"
+        required: false
+      OPENAI_TOKEN:
+        description: "Optional token for API calls with OpenAI models"
+        required: false
       OPENCODE_GITHUB_TOKEN:
         description: "Optional token for API calls; defaults to GITHUB_TOKEN"
         required: false
@@ -97,18 +103,62 @@ jobs:
         with:
           node-version: "24"
 
+      - name: Setup bun
+        uses: oven-sh/setup-bun@v2
+
       - name: Install GitHub CLI
         uses: dev-hanz-ops/install-gh-cli-action@v0.2.1
-        # with:
-        # current latest
-        # https://github.com/cli/cli/releases/tag/v2.81.0
-        # gh-cli-version: 2.81.0
+        with:
+          # current latest
+          # https://github.com/cli/cli/releases/tag/v2.81.0
+          gh-cli-version: 2.88.1
 
       - name: Auth with GitHub CLI
         run: |
           echo -n "${{ secrets.TOKEN }}" | gh auth login --with-token
           echo "✅ GitHub CLI authenticated"
 
+      - name: Validate PR exists
+        id: validate-pr
+        run: |
+          REPO="${{ inputs.repository }}"
+          PR_NUMBER="${{ inputs.pr_number }}"
+
+          echo "🔍 Validating PR #$PR_NUMBER in $REPO..."
+
+          # Get PR details including head SHA for check status
+          PR_DATA=$(gh pr view "$PR_NUMBER" --repo "$REPO" --json number,title,state,headRefName,baseRefName,author,additions,deletions,changedFiles,headRefOid 2>&1) || {
+            echo "❌ Failed to fetch PR #$PR_NUMBER from $REPO"
+            echo "Error: $PR_DATA"
+            exit 1
+          }
+
+          echo "$PR_DATA" | jq .
+
+          # Check if PR is open
+          PR_STATE=$(echo "$PR_DATA" | jq -r '.state')
+          if [ "$PR_STATE" != "OPEN" ]; then
+            echo "⚠️ PR #$PR_NUMBER is not open (state: $PR_STATE). Skipping review."
+            echo "skip=true" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          # Extract PR info for later use
+          echo "pr_title=$(echo "$PR_DATA" | jq -r '.title')" >> $GITHUB_OUTPUT
+          echo "pr_author=$(echo "$PR_DATA" | jq -r '.author.login')" >> $GITHUB_OUTPUT
+          echo "head_branch=$(echo "$PR_DATA" | jq -r '.headRefName')" >> $GITHUB_OUTPUT
+          echo "base_branch=$(echo "$PR_DATA" | jq -r '.baseRefName')" >> $GITHUB_OUTPUT
+          echo "additions=$(echo "$PR_DATA" | jq -r '.additions')" >> $GITHUB_OUTPUT
+          echo "deletions=$(echo "$PR_DATA" | jq -r '.deletions')" >> $GITHUB_OUTPUT
+          echo "changed_files=$(echo "$PR_DATA" | jq -r '.changedFiles')" >> $GITHUB_OUTPUT
+          echo "head_sha=$(echo "$PR_DATA" | jq -r '.headRefOid')" >> $GITHUB_OUTPUT
+          echo "skip=false" >> $GITHUB_OUTPUT
+
+          echo "✅ PR validated successfully"
+
+      # TODO: Add pending status to review (do this after we validated the flow)
+
+      # TODO: Add cache from kilo-pr-review
       - name: Install OpenCode CLI
         run: |
           set -euo pipefail
@@ -116,6 +166,10 @@ jobs:
           curl -fsSL https://opencode.ai/install | OPENCODE_INSTALL_DIR="$HOME/.local/bin" bash
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
           opencode --version
+
+      # TODO: enable this after we get the basic flow working
+      # - name: Install oh-my-opencode-slim
+      #   run: bunx oh-my-opencode-slim@latest install --no-tui --tmux=no --skills=yes
 
       - name: Clone target repository
         if: steps.validate-pr.outputs.skip != 'true'
@@ -127,6 +181,9 @@ jobs:
           gh repo clone "$REPO" . -- --depth=1
           gh pr checkout $PR_NUMBER
           echo "✅ Repository cloned and PR checked out"
+
+      # TODO: generate the config (use the OPENAI_BASEURL and OPENAI_TOKEN for setup)
+      - name: Prepare opencode config
 
       - name: Prepare OpenCode event payload
         env:
