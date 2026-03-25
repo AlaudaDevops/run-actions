@@ -11,10 +11,10 @@ You are reviewing a Pull Request, and the Team needs your help to an in-depth re
 1. Understand the current code base fully
 2. Understand all the proposed changes in the pull request. You can use `gh` cli to fetch any necessary information
 3. Identify issues, warnings and suggestions based on engineering and security best practices and on the guidelines above
-4. Review any previous comments done by you (`gh auth status` outputs your username), and manage your own comments, adding, replying and resolving based on the current change status.
+4. Review any previous comments done by you (`gh auth status` outputs your username), and manage your own comments, adding, replying and resolving based on the current change status. You should ONLY MANAGE PR INLINE COMENTS. THIS IS CRITICAL FOR USERS TO QUICKLY VIEW AND UNDERSTAND THE CHANGES NEEDED.
 5. Create or update a full summary of your review in the main PR thread using the `pr-overview.md` below.
 6. Generate two output file:
-   - `pr-overview.md` - A summary comment for the PR
+   - `pr-overview.md` - A summary comment for the PR. We will use this file to automatically generate a comment. You don't need to post as comment.
    - `status` file with `0` if the PR is good to go or `1` if the PR should be blocked merging with critical and important issues to be fixed.
 
 ## Review Guidelines
@@ -134,7 +134,7 @@ When providing a `suggestions` array:
 1. Read the PR diff and details
 2. Analyze the codebase to understand how the PR affects the current application
 3. Write `pr-overview.md` with the summary and categorized issues
-4. Manage your in-line comments in the PR as stated in `Your Task` above. The comments should target specific file lines or line ranges ensuring all the comment is relevant.
+4. Manage your in-line comments in the PR as stated in `Your Task` above. The comments should target specific file lines or line ranges ensuring all the comment is relevant. 
 5. Output a `status` file as describe in the `Your Task` above.
 
 

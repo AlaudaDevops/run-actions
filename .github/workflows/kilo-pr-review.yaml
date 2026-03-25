@@ -72,7 +72,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout run-actions repo (for shared prompt)
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           path: run-actions
 
@@ -91,6 +91,7 @@ jobs:
       - name: Auth with GitHub CLI
         run: |
           echo -n "${{ secrets.TOKEN }}" | gh auth login --with-token
+          gh auth status
           echo "✅ GitHub CLI authenticated"
 
       - name: Validate PR exists
@@ -289,12 +290,16 @@ jobs:
           fi
 
           cp "run-actions/.github/workflows/opencode.template.json" "$HOME/.config/opencode/opencode.json"
+          cat $HOME/.config/opencode/opencode.json
           echo "✅ Wrote $HOME/.config/opencode/opencode.json"
 
       - name: Run AI review
         if: steps.validate-pr.outputs.skip != 'true'
         id: opencode-review
         working-directory: target-repo
+        env:
+          OPENAI_BASEURL: ${{ secrets.OPENAI_BASEURL }}
+          OPENAI_TOKEN: ${{ secrets.OPENAI_TOKEN }}
         run: |
           set -euo pipefail
 
