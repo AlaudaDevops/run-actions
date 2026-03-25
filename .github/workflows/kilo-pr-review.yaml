@@ -54,21 +54,18 @@ on:
       TOKEN:
         description: "GitHub token with repo access"
         required: true
-      KILO_API_KEY:
-        description: "API key for the AI provider (e.g., Anthropic API key)"
-        required: true
+      OPENAI_BASEURL:
+        description: "Optional base url for API calls with OpenAI models"
+        required: false
+      OPENAI_TOKEN:
+        description: "Optional token for API calls with OpenAI models"
+        required: false
 
 env:
   REVIEW_COMMENT_MARKER: "<!-- kilo-pr-review-comment -->"
-  INLINE_COMMENT_MARKER: "<!-- ai-code-review-inline -->"
   SHARED_PROMPT_PATH: ".github/prompts/code-review.md"
   PERSONALIZED_PROMPT_PATH: ".github/prompts/pr-review.md"
-  #AI_MODEL: "mistralai/devstral-2512:free"
-  AI_MODEL: "z-ai/glm-4.7:free"
-  ## Keeping for easier switch in the future
-  # OPENCODE_MODEL: "opencode/minimax-m2.1-free"
-  OPENCODE_MODEL: "opencode/minimax-m2.5-free"
-  USE_OPENCODE: "true"
+  OPENCODE_MODEL: "openai/gpt-5.3-codex"
 
 jobs:
   review-pr:
@@ -155,22 +152,8 @@ jobs:
 
           echo "✅ Commit status set to pending"
 
-      - name: Install Kilo CLI
-        if: steps.validate-pr.outputs.skip != 'true' && env.USE_OPENCODE != 'true'
-        run: |
-          npm install -g @kilocode/cli
-          echo "✅ Kilo CLI installed: $(kilocode --version || echo 'version check not supported')"
-
-      # - name: Install OpenCode CLI
-      #   if: steps.validate-pr.outputs.skip != 'true' && env.USE_OPENCODE == 'true'
-      #   run: |
-      #     set -euo pipefail
-      #     mkdir -p "$HOME/.local/bin"
-      #     curl -fsSL https://opencode.ai/install | OPENCODE_INSTALL_DIR="$HOME/.local/bin" bash
-      #     echo "$HOME/.local/bin" >> "$GITHUB_PATH"
-      #     opencode --version
       - name: Get opencode version
-        if: steps.validate-pr.outputs.skip != 'true' && env.USE_OPENCODE == 'true'
+        if: steps.validate-pr.outputs.skip != 'true'
         id: version
         shell: bash
         run: |
@@ -178,7 +161,7 @@ jobs:
           echo "version=${VERSION:-latest}" >> $GITHUB_OUTPUT
 
       - name: Cache opencode
-        if: steps.validate-pr.outputs.skip != 'true' && env.USE_OPENCODE == 'true'
+        if: steps.validate-pr.outputs.skip != 'true'
         id: cache
         uses: actions/cache@v4
         with:
@@ -186,12 +169,12 @@ jobs:
           key: opencode-${{ runner.os }}-${{ runner.arch }}-${{ steps.version.outputs.version }}
 
       - name: Install opencode
-        if: steps.cache.outputs.cache-hit != 'true' && steps.validate-pr.outputs.skip != 'true' && env.USE_OPENCODE == 'true'
+        if: steps.cache.outputs.cache-hit != 'true' && steps.validate-pr.outputs.skip != 'true'
         shell: bash
         run: curl -fsSL https://opencode.ai/install | bash
 
       - name: Add opencode to PATH
-        if: steps.validate-pr.outputs.skip != 'true' && env.USE_OPENCODE == 'true'
+        if: steps.validate-pr.outputs.skip != 'true'
         shell: bash
         run: echo "$HOME/.opencode/bin" >> $GITHUB_PATH
 
@@ -208,30 +191,6 @@ jobs:
           gh pr checkout $PR_NUMBER
           # gh repo clone "$REPO" target-repo -- --branch "$HEAD_BRANCH" --depth 50
           echo "✅ Repository cloned"
-
-      - name: Get PR diff
-        if: steps.validate-pr.outputs.skip != 'true'
-        id: get-diff
-        run: |
-          REPO="${{ inputs.repository }}"
-          PR_NUMBER="${{ inputs.pr_number }}"
-
-          echo "📄 Fetching PR diff..."
-          gh pr diff "$PR_NUMBER" --repo "$REPO" > pr_diff.patch
-
-          # Get diff stats
-          DIFF_LINES=$(wc -l < pr_diff.patch)
-          echo "📊 Diff size: $DIFF_LINES lines"
-
-          # Check if diff is too large (>10000 lines)
-          if [ "$DIFF_LINES" -gt 10000 ]; then
-            echo "⚠️ Large diff detected ($DIFF_LINES lines). Review may be truncated."
-            echo "large_diff=true" >> $GITHUB_OUTPUT
-          else
-            echo "large_diff=false" >> $GITHUB_OUTPUT
-          fi
-
-          echo "✅ PR diff fetched"
 
       - name: Load shared prompt
         if: steps.validate-pr.outputs.skip != 'true'
@@ -308,110 +267,51 @@ jobs:
 
           cat >> review_prompt.md << 'EOF'
 
-          ## Your Task
-
-          1. Review the PR diff below thoroughly
-          2. Identify issues based on the guidelines above
-          3. Provide your review in the specified format
-
-          ## PR Diff
-
-          ```diff
           EOF
-
-          cat pr_diff.patch >> review_prompt.md
-
-          echo '```' >> review_prompt.md
 
           echo "✅ Review prompt prepared ($(wc -l < review_prompt.md) lines)"
           cat review_prompt.md
           echo "----"
 
-      - name: Configure Kilo CLI
-        if: steps.validate-pr.outputs.skip != 'true' && env.USE_OPENCODE != 'true'
+      - name: Prepare opencode config
+        if: steps.validate-pr.outputs.skip != 'true'
+        env:
+          OPENAI_BASEURL: ${{ secrets.OPENAI_BASEURL }}
+          OPENAI_TOKEN: ${{ secrets.OPENAI_TOKEN }}
         run: |
-          mkdir -p ~/.kilocode/cli
+          set -euo pipefail
+          mkdir -p "$HOME/.config/opencode"
+          MODEL="${OPENCODE_MODEL}"
 
-          # Configure Kilo CLI with API key (newest 1.0.x syntax)
-          cat > ~/.kilocode/cli/config.json << EOF
-          {
-            "version": "1.0.0",
-            "mode": "code",
-            "telemetry": false,
-            "provider": "default",
-            "providers": [
-              {
-                "id": "default",
-                "provider": "kilocode",
-                "kilocodeToken": "${{ secrets.KILO_API_KEY }}",
-                "kilocodeModel": "$AI_MODEL"
-              }
-            ],
-            "autoApproval": {
-              "enabled": true
-            }
-          }
-          EOF
+          if [[ "$MODEL" == openai/* ]] && [ -z "${OPENAI_TOKEN:-}" ]; then
+            echo "❌ OPENAI_TOKEN is required when using model '$MODEL'"
+            exit 1
+          fi
 
-          echo "✅ Kilo CLI configured"
-
-      - name: Configure Opencode CLI
-        if: steps.validate-pr.outputs.skip != 'true' && env.USE_OPENCODE == 'true'
-        run: |
-          mkdir -p ~/.config/opencode
-
-          # Configure Opencode CLI with API key (newest 1.0.x syntax)
-          cat > ~/.config/opencode/opencode.json << 'EOF'
-          {
-            "$schema": "https://opencode.ai/config.json",
-            "permission": {
-              "read": "allow",
-              "edit": "allow",
-              "glob": "allow",
-              "grep": "allow",
-              "list": "allow",
-              "bash": "allow",
-              "task": "allow",
-              "external_directory": "allow",
-              "todowrite": "allow",
-              "todoread": "allow",
-              "question": "allow",
-              "webfetch": "allow",
-              "websearch": "allow",
-              "codesearch": "allow",
-              "lsp": "allow",
-              "doom_loop": "allow",
-              "write": "allow",
-              "skill": "allow"
-            }
-          }
-          EOF
-
-          echo "✅ Opencode configured"
+          cp "run-actions/.github/workflows/opencode.template.json" "$HOME/.config/opencode/opencode.json"
+          echo "✅ Wrote $HOME/.config/opencode/opencode.json"
 
       - name: Run AI review
         if: steps.validate-pr.outputs.skip != 'true'
-        id: kilo-review
+        id: opencode-review
         working-directory: target-repo
         run: |
           set -euo pipefail
 
           echo "🤖 Starting AI code review..."
 
-          if [ -f "$(which kilo)" ]; then
-            echo "Review this PR according to the guidelines in the system prompt" | kilo run --model $AI_MODEL --auto --file ../review_prompt.md | tee ../kilo_output.log
-          else
-            echo "Review this PR according to the guidelines in the system prompt" | opencode run --model $OPENCODE_MODEL --file ../review_prompt.md | tee ../kilo_output.log
-          fi
-          KILO_EXIT_CODE=${PIPESTATUS[0]}
+          echo "Review this PR according to the guidelines in the system prompt" | opencode run --model $OPENCODE_MODEL --file ../review_prompt.md | tee ../kilo_output.log
 
-          COMMENT_COUNT=0
+          OPENCODE_EXIT_CODE=${PIPESTATUS[0]}
+
+          PR_STATUS=0
           HAS_OVERVIEW=false
-          HAS_COMMENTS=false
+          HAS_STATUS=false
 
           if [ -f "pr-overview.md" ]; then
             cp pr-overview.md ../review_output.md
             echo "✅ Review output saved to ../review_output.md"
+            echo "------------------------"
             cat pr-overview.md
             echo "------------------------"
             HAS_OVERVIEW=true
@@ -420,244 +320,37 @@ jobs:
             echo "No review output generated" > ../review_output.md
           fi
 
-          if [ -f "pr-comments.json" ]; then
-            # Validate JSON syntax first
-            if jq empty pr-comments.json 2>/dev/null; then
-              # Validate JSON schema structure
-              SCHEMA_VALID=true
-
-              # Check required top-level fields
-              if ! jq -e '.source and .diagnostics' pr-comments.json >/dev/null 2>&1; then
-                echo "⚠️ pr-comments.json missing required fields (source, diagnostics)"
-                SCHEMA_VALID=false
-              fi
-
-              # Validate each diagnostic has required fields
-              if [ "$SCHEMA_VALID" = "true" ]; then
-                INVALID_DIAGS=$(jq '[.diagnostics[] | select(.message == null or .location == null or .location.path == null or .location.range == null or .location.range.start == null or .location.range.start.line == null)] | length' pr-comments.json 2>/dev/null || echo "999")
-                if [ "$INVALID_DIAGS" != "0" ]; then
-                  echo "⚠️ Found $INVALID_DIAGS diagnostic(s) with missing required fields (message, location.path, location.range.start.line)"
-                  # Filter out invalid diagnostics instead of rejecting entirely
-                  jq '{source: .source, diagnostics: [.diagnostics[] | select(.message != null and .location != null and .location.path != null and .location.range != null and .location.range.start != null and .location.range.start.line != null)]}' pr-comments.json > ../review_comments.json
-                  echo "✅ Filtered to valid diagnostics only"
-                else
-                  cp pr-comments.json ../review_comments.json
-                fi
-              else
-                echo '{"source":{"name":"ai-code-review","url":"https://github.com/alaudadevops/run-actions"},"diagnostics":[]}' > ../review_comments.json
-              fi
-
-              echo "✅ Review comments saved to ../review_comments.json"
-              cat ../review_comments.json
-              echo "------------------------"
-              HAS_COMMENTS=true
-              # Count diagnostics in the validated JSON
-              COMMENT_COUNT=$(jq '.diagnostics | length' ../review_comments.json 2>/dev/null || echo "0")
-              echo "📊 Found $COMMENT_COUNT valid review comments"
-            else
-              echo "⚠️ pr-comments.json is not valid JSON, skipping"
-              echo '{"source":{"name":"ai-code-review","url":"https://github.com/alaudadevops/run-actions"},"diagnostics":[]}' > ../review_comments.json
-              COMMENT_COUNT=0
-            fi
-          else
-            echo "❌ No review comments found"
-            echo '{"source":{"name":"ai-code-review","url":"https://github.com/alaudadevops/run-actions"},"diagnostics":[]}' > ../review_comments.json
-            COMMENT_COUNT=0
+          if [ -f "status" ]; then
+            cp status ../status
+            echo "✅ Review output saved to ../status"
+            echo "------------------------"
+            cat status
+            echo "------------------------"
+            HAS_STATUS=true
+            PR_STATUS="$(cat status)"
           fi
 
-          NUMBER_OF_CRITICAL_ISSUES=$(jq '[.diagnostics[] | select(.severity | IN("CRITICAL","ERROR"))] | length' ../review_comments.json)
 
-          if [ "$KILO_EXIT_CODE" -ne 0 ]; then
-            echo "❌ Kilo CLI exited with status $KILO_EXIT_CODE"
-            exit "$KILO_EXIT_CODE"
-          fi
-
-          if [ "$HAS_OVERVIEW" != "true" ] && [ "$HAS_COMMENTS" != "true" ]; then
-            echo "❌ Kilo produced no outputs (overview or comments)"
+          if [ "$HAS_OVERVIEW" != "true" ] && [ "$HAS_STATUS" != "true" ]; then
+            echo "❌ Opencode produced no outputs (overview or status)"
             exit 1
           fi
 
 
-          echo "✅ Kilo review completed"
+          echo "✅ Opencode review completed"
           echo "📄 Review output saved ($(wc -l < ../review_output.md) lines)"
-          echo "comment_count=$COMMENT_COUNT" >> $GITHUB_OUTPUT
-          echo "error_count=$NUMBER_OF_CRITICAL_ISSUES" >> $GITHUB_OUTPUT
           echo "has_overview=$HAS_OVERVIEW" >> $GITHUB_OUTPUT
-          echo "has_comments=$HAS_COMMENTS" >> $GITHUB_OUTPUT
-
-      - name: Delete existing inline comments
-        if: steps.validate-pr.outputs.skip != 'true' && inputs.dry_run != true
-        run: |
-          REPO="${{ inputs.repository }}"
-          PR_NUMBER="${{ inputs.pr_number }}"
-          MARKER="${{ env.INLINE_COMMENT_MARKER }}"
-
-          echo "🗑️ Deleting existing AI review inline comments..."
-
-          # Get all review comments on the PR
-          COMMENTS=$(gh api "repos/$REPO/pulls/$PR_NUMBER/comments" --paginate 2>/dev/null || echo "[]")
-
-          # Find and delete comments with our marker
-          DELETED=0
-          echo "$COMMENTS" | jq -r ".[] | select(.body | contains(\"$MARKER\")) | .id" | while read -r COMMENT_ID; do
-            if [ -n "$COMMENT_ID" ] && [ "$COMMENT_ID" != "null" ]; then
-              gh api "repos/$REPO/pulls/comments/$COMMENT_ID" --method DELETE 2>/dev/null && {
-                echo "  Deleted comment $COMMENT_ID"
-                DELETED=$((DELETED + 1))
-              } || echo "  Failed to delete comment $COMMENT_ID"
-            fi
-          done
-
-          echo "✅ Cleanup complete"
-
-      - name: Validate line numbers against diff
-        if: steps.validate-pr.outputs.skip != 'true'
-        run: |
-          echo "🔍 Validating diagnostic line numbers against PR diff..."
-
-          if [ ! -f review_comments.json ] || [ ! -f pr_diff.patch ]; then
-            echo "ℹ️ Missing review_comments.json or pr_diff.patch, skipping validation"
-            exit 0
-          fi
-
-          # Extract valid line ranges from diff for each file
-          # Format: file:start_line:end_line (for each hunk)
-          extract_valid_lines() {
-            local current_file=""
-            local new_line=0
-            local in_hunk=false
-
-            while IFS= read -r line; do
-              # Match diff file header: +++ b/path/to/file
-              if [[ "$line" =~ ^\+\+\+[[:space:]]b/(.+)$ ]]; then
-                current_file="${BASH_REMATCH[1]}"
-                in_hunk=false
-              # Match hunk header: @@ -old,count +new,count @@
-              elif [[ "$line" =~ ^@@[[:space:]]-[0-9]+(,[0-9]+)?[[:space:]]\+([0-9]+)(,[0-9]+)?[[:space:]]@@ ]]; then
-                new_line="${BASH_REMATCH[2]}"
-                in_hunk=true
-              elif [ "$in_hunk" = true ] && [ -n "$current_file" ]; then
-                # Lines starting with + or space (not -) are valid in new file
-                if [[ "$line" =~ ^[+\ ] ]]; then
-                  echo "$current_file:$new_line"
-                  ((new_line++))
-                elif [[ "$line" =~ ^- ]]; then
-                  # Removed line - don't increment new_line counter
-                  :
-                fi
-              fi
-            done < pr_diff.patch
-          }
-
-          # Build lookup of valid file:line combinations
-          echo "📄 Extracting valid lines from diff..."
-          VALID_LINES=$(extract_valid_lines | sort -u)
-          VALID_LINES_FILE=$(mktemp)
-          echo "$VALID_LINES" > "$VALID_LINES_FILE"
-          VALID_COUNT=$(wc -l < "$VALID_LINES_FILE" | tr -d ' ')
-          echo "  Found $VALID_COUNT valid file:line combinations"
-
-          # Filter diagnostics to only those with valid line numbers
-          echo "🔎 Filtering diagnostics..."
-          ORIGINAL_COUNT=$(jq '.diagnostics | length' review_comments.json)
-
-          jq -c '.diagnostics[]' review_comments.json | while read -r diag; do
-            FILE=$(echo "$diag" | jq -r '.location.path // empty')
-            LINE=$(echo "$diag" | jq -r '.location.range.start.line // 0')
-
-            if grep -q "^${FILE}:${LINE}$" "$VALID_LINES_FILE" 2>/dev/null; then
-              echo "$diag"
-            else
-              echo "  ⚠️ Skipping invalid line: $FILE:$LINE (not in diff)" >&2
-            fi
-          done | jq -s '{source: {"name": "ai-code-review", "url": "https://github.com/alaudadevops/run-actions"}, diagnostics: .}' > review_comments_validated.json
-
-          mv review_comments_validated.json review_comments.json
-          rm -f "$VALID_LINES_FILE"
-
-          FILTERED_COUNT=$(jq '.diagnostics | length' review_comments.json)
-          REMOVED=$((ORIGINAL_COUNT - FILTERED_COUNT))
-
-          if [ "$REMOVED" -gt 0 ]; then
-            echo "⚠️ Removed $REMOVED diagnostic(s) with invalid line numbers"
-          fi
-          echo "✅ Validation complete: $FILTERED_COUNT valid diagnostics remaining"
-
-      - name: Post inline comments via GitHub API
-        if: steps.validate-pr.outputs.skip != 'true' && inputs.dry_run != true
-        run: |
-          REPO="${{ inputs.repository }}"
-          PR_NUMBER="${{ inputs.pr_number }}"
-          HEAD_SHA="${{ steps.validate-pr.outputs.head_sha }}"
-          MARKER="${{ env.INLINE_COMMENT_MARKER }}"
-
-          echo "📝 Posting inline comments via GitHub API..."
-
-          if [ ! -f review_comments.json ]; then
-            echo "ℹ️ No comments file found"
-            exit 0
-          fi
-
-          # Validate JSON first
-          if ! jq empty review_comments.json 2>/dev/null; then
-            echo "⚠️ review_comments.json is not valid JSON, skipping"
-            exit 0
-          fi
-
-          # Check if there are any diagnostics
-          DIAG_COUNT=$(jq '.diagnostics | length' review_comments.json 2>/dev/null || echo "0")
-          if [ "$DIAG_COUNT" = "0" ] || [ -z "$DIAG_COUNT" ]; then
-            echo "ℹ️ No diagnostics to post"
-            exit 0
-          fi
-
-          echo "📊 Posting $DIAG_COUNT inline comments..."
-
-          # Read and post each diagnostic as a review comment
-          jq -c '.diagnostics[]' review_comments.json 2>/dev/null | while read -r diag; do
-            FILE=$(echo "$diag" | jq -r '.location.path // empty')
-            LINE=$(echo "$diag" | jq -r '.location.range.start.line // 1')
-            MESSAGE=$(echo "$diag" | jq -r '.message // empty')
-            SEVERITY=$(echo "$diag" | jq -r '.severity // "INFO"')
-            CODE=$(echo "$diag" | jq -r '.code.value // empty')
-
-            # Skip if essential fields are missing
-            if [ -z "$FILE" ] || [ -z "$MESSAGE" ]; then
-              echo "  ⚠️ Skipping invalid diagnostic (missing file or message)"
-              continue
-            fi
-
-            # Format the comment body with marker for future cleanup
-            if [ -n "$CODE" ]; then
-              BODY=$(printf "%s\n**[%s]** \`%s\`\n\n%s" "$MARKER" "$SEVERITY" "$CODE" "$MESSAGE")
-            else
-              BODY=$(printf "%s\n**[%s]**\n\n%s" "$MARKER" "$SEVERITY" "$MESSAGE")
-            fi
-
-            echo "  → $FILE:$LINE [$SEVERITY]"
-
-            # Create a review comment on the PR
-            gh api "repos/$REPO/pulls/$PR_NUMBER/comments" \
-              --method POST \
-              -f body="$BODY" \
-              -f commit_id="$HEAD_SHA" \
-              -f path="$FILE" \
-              -F line="$LINE" \
-              -f side="RIGHT" 2>/dev/null || echo "    ⚠️ Failed to post (line may not be in diff)"
-          done
-
-          echo "✅ Inline comments posted"
+          echo "has_status=$HAS_STATUS" >> $GITHUB_OUTPUT
+          echo "pr_status=$PR_STATUS" >> $GITHUB_OUTPUT
 
       - name: Post overview comment
         if: steps.validate-pr.outputs.skip != 'true' && inputs.dry_run != true
         run: |
           REPO="${{ inputs.repository }}"
           PR_NUMBER="${{ inputs.pr_number }}"
-          MODEL="$AI_MODEL"
+          MODEL="$OPENCODE_MODEL"
           REVIEW_STYLE="${{ inputs.review_style }}"
           HAS_PERSONALIZED="${{ steps.personalized-prompt.outputs.has_personalized }}"
-          COMMENT_COUNT="${{ steps.kilo-review.outputs.comment_count }}"
-          ERROR_COUNT="${{ steps.kilo-review.outputs.error_count }}"
           MARKER="${{ env.REVIEW_COMMENT_MARKER }}"
           WORKFLOW_URL="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
 
@@ -673,8 +366,6 @@ jobs:
           |----------|-------|
           | **Model** | \`$MODEL\` |
           | **Style** | $REVIEW_STYLE |
-          | **Issues Found** | $COMMENT_COUNT |
-          | **Warnings/Errors** | $ERROR_COUNT |
           | **Personalized Prompt** | $([ "$HAS_PERSONALIZED" = "true" ] && echo "✅ Yes" || echo "❌ No") |
           | **Reviewed at** | $(date -u +"%Y-%m-%d %H:%M:%S UTC") |
 
@@ -717,15 +408,15 @@ jobs:
         run: |
           REPO="${{ inputs.repository }}"
           HEAD_SHA="${{ steps.validate-pr.outputs.head_sha }}"
-          COMMENT_COUNT="${{ steps.kilo-review.outputs.comment_count }}"
-          ERROR_COUNT="${{ steps.kilo-review.outputs.error_count }}"
+          HAS_STATUS="${{ steps.opencode-review.outputs.has_status }}"
+          PR_STATUS="${{ steps.opencode-review.outputs.pr_status }}"
 
           WORKFLOW_URL="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
 
           echo "📝 Updating commit status for $HEAD_SHA..."
 
           # Determine state based on comment count
-          if [ -z "$ERROR_COUNT" ] || [ "$ERROR_COUNT" = "0" ]; then
+          if [ -z "$PR_STATUS" ] || [ "$PR_STATUS" = "0" ]; then
             STATE="success"
             DESCRIPTION="No issues found"
           else
@@ -734,7 +425,7 @@ jobs:
           fi
 
           # Check if the review step failed
-          if [ "${{ steps.kilo-review.outcome }}" = "failure" ]; then
+          if [ "${{ steps.opencode-review.outcome }}" = "failure" ]; then
             STATE="error"
             DESCRIPTION="Review process failed"
           fi
@@ -770,7 +461,7 @@ jobs:
           PR_NUMBER="${{ inputs.pr_number }}"
           SKIP="${{ steps.validate-pr.outputs.skip }}"
           DRY_RUN="${{ inputs.dry_run }}"
-          COMMENT_COUNT="${{ steps.kilo-review.outputs.comment_count }}"
+          COMMENT_COUNT="${{ steps.opencode-review.outputs.comment_count }}"
           MODEL="$OPENCODE_MODEL"
 
           REVIEW_STYLE="${{ inputs.review_style }}"
@@ -794,13 +485,4 @@ jobs:
             echo "## Review Output" >> $GITHUB_STEP_SUMMARY
             echo "" >> $GITHUB_STEP_SUMMARY
             cat review_output.md >> $GITHUB_STEP_SUMMARY
-          fi
-
-          if [ "$SKIP" != "true" ] && [ -f review_comments.json ]; then
-            echo "" >> $GITHUB_STEP_SUMMARY
-            echo "## Inline Comments" >> $GITHUB_STEP_SUMMARY
-            echo "" >> $GITHUB_STEP_SUMMARY
-            echo '```json' >> $GITHUB_STEP_SUMMARY
-            cat review_comments.json >> $GITHUB_STEP_SUMMARY
-            echo '```' >> $GITHUB_STEP_SUMMARY
           fi
