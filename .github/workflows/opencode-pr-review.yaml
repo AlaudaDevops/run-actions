@@ -34,6 +34,12 @@ on:
         default: false
         type: boolean
     secrets:
+      OPENAI_BASEURL:
+        description: "Optional base url for API calls with OpenAI models"
+        required: false
+      OPENAI_TOKEN:
+        description: "Optional token for API calls with OpenAI models"
+        required: false
       OPENCODE_GITHUB_TOKEN:
         description: "Optional token for API calls; defaults to GITHUB_TOKEN"
         required: false
@@ -67,10 +73,15 @@ on:
         required: false
         default: "strict"
         type: string
+      dry_run:
+        description: "Dry run mode (output review but don't post comments)"
+        required: false
+        default: false
+        type: boolean
 
 env:
   # Fast tweak: update this model string to switch providers/models.
-  OPENCODE_MODEL: "opencode/minimax-m2.5-free"
+  OPENCODE_MODEL: "openai/gpt-5.3-codex"
   # Simple default review prompt.
   OPENCODE_REVIEW_PROMPT: "Review this pull request for correctness, security, and maintainability. Provide a concise summary and add inline comments for actionable issues. You can use the gh cli to post/update your comments in the PR"
 
@@ -84,10 +95,11 @@ jobs:
       id-token: write
 
     steps:
-      - name: Checkout repository
+      - name: Checkout target repository
         uses: actions/checkout@v4
         with:
           repository: ${{ inputs.repository }}
+          path: target-repo
           fetch-depth: 1
           token: ${{ secrets.TOKEN }}
           persist-credentials: false
@@ -97,58 +109,187 @@ jobs:
         with:
           node-version: "24"
 
+      - name: Setup bun
+        uses: oven-sh/setup-bun@v2
+
       - name: Install GitHub CLI
         uses: dev-hanz-ops/install-gh-cli-action@v0.2.1
-        # with:
-        # current latest
-        # https://github.com/cli/cli/releases/tag/v2.81.0
-        # gh-cli-version: 2.81.0
+        with:
+          # current latest
+          # https://github.com/cli/cli/releases/tag/v2.81.0
+          gh-cli-version: 2.88.1
 
       - name: Auth with GitHub CLI
         run: |
           echo -n "${{ secrets.TOKEN }}" | gh auth login --with-token
           echo "✅ GitHub CLI authenticated"
 
-      - name: Install OpenCode CLI
-        run: |
-          set -euo pipefail
-          mkdir -p "$HOME/.local/bin"
-          curl -fsSL https://opencode.ai/install | OPENCODE_INSTALL_DIR="$HOME/.local/bin" bash
-          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
-          opencode --version
-
-      - name: Clone target repository
-        if: steps.validate-pr.outputs.skip != 'true'
+      - name: Validate PR exists
+        id: validate-pr
         run: |
           REPO="${{ inputs.repository }}"
           PR_NUMBER="${{ inputs.pr_number }}"
 
-          echo "📦 Cloning $REPO..."
-          gh repo clone "$REPO" . -- --depth=1
-          gh pr checkout $PR_NUMBER
-          echo "✅ Repository cloned and PR checked out"
+          echo "🔍 Validating PR #$PR_NUMBER in $REPO..."
+
+          # Get PR details including head SHA for check status
+          PR_DATA=$(gh pr view "$PR_NUMBER" --repo "$REPO" --json number,title,state,headRefName,baseRefName,author,additions,deletions,changedFiles,headRefOid 2>&1) || {
+            echo "❌ Failed to fetch PR #$PR_NUMBER from $REPO"
+            echo "Error: $PR_DATA"
+            exit 1
+          }
+
+          echo "$PR_DATA" | jq .
+
+          # Check if PR is open
+          PR_STATE=$(echo "$PR_DATA" | jq -r '.state')
+          if [ "$PR_STATE" != "OPEN" ]; then
+            echo "⚠️ PR #$PR_NUMBER is not open (state: $PR_STATE). Skipping review."
+            echo "skip=true" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          # Extract PR info for later use
+          echo "pr_title=$(echo "$PR_DATA" | jq -r '.title')" >> $GITHUB_OUTPUT
+          echo "pr_author=$(echo "$PR_DATA" | jq -r '.author.login')" >> $GITHUB_OUTPUT
+          echo "head_branch=$(echo "$PR_DATA" | jq -r '.headRefName')" >> $GITHUB_OUTPUT
+          echo "base_branch=$(echo "$PR_DATA" | jq -r '.baseRefName')" >> $GITHUB_OUTPUT
+          echo "additions=$(echo "$PR_DATA" | jq -r '.additions')" >> $GITHUB_OUTPUT
+          echo "deletions=$(echo "$PR_DATA" | jq -r '.deletions')" >> $GITHUB_OUTPUT
+          echo "changed_files=$(echo "$PR_DATA" | jq -r '.changedFiles')" >> $GITHUB_OUTPUT
+          echo "head_sha=$(echo "$PR_DATA" | jq -r '.headRefOid')" >> $GITHUB_OUTPUT
+          echo "skip=false" >> $GITHUB_OUTPUT
+
+          echo "✅ PR validated successfully"
+
+      - name: Set commit status (pending)
+        if: steps.validate-pr.outputs.skip != 'true'
+        run: |
+          REPO="${{ inputs.repository }}"
+          HEAD_SHA="${{ steps.validate-pr.outputs.head_sha }}"
+          WORKFLOW_URL="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+
+          echo "📝 Setting commit status to pending for $HEAD_SHA..."
+
+          gh api "repos/$REPO/statuses/$HEAD_SHA" \
+            --method POST \
+            -f state="pending" \
+            -f target_url="$WORKFLOW_URL" \
+            -f description="OpenCode review in progress..." \
+            -f context="OpenCode PR Review" || {
+            echo "⚠️ Failed to set commit status"
+          }
+
+          echo "✅ Commit status set to pending"
+
+      - name: Get opencode version
+        if: steps.validate-pr.outputs.skip != 'true'
+        id: version
+        shell: bash
+        run: |
+          VERSION=$(curl -sf https://api.github.com/repos/anomalyco/opencode/releases/latest | grep -o '"tag_name": *"[^"]*"' | cut -d'"' -f4)
+          echo "version=${VERSION:-latest}" >> "$GITHUB_OUTPUT"
+
+      - name: Cache opencode
+        if: steps.validate-pr.outputs.skip != 'true'
+        id: cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.opencode/bin
+          key: opencode-${{ runner.os }}-${{ runner.arch }}-${{ steps.version.outputs.version }}
+
+      - name: Install opencode
+        if: steps.validate-pr.outputs.skip != 'true' && steps.cache.outputs.cache-hit != 'true'
+        shell: bash
+        run: curl -fsSL https://opencode.ai/install | bash
+
+      - name: Add opencode to PATH
+        if: steps.validate-pr.outputs.skip != 'true'
+        shell: bash
+        run: |
+          echo "$HOME/.opencode/bin" >> "$GITHUB_PATH"
+          "$HOME/.opencode/bin/opencode" --version
+
+      # TODO: enable this after we get the basic flow working
+      # - name: Install oh-my-opencode-slim
+      #   run: bunx oh-my-opencode-slim@latest install --no-tui --tmux=no --skills=yes
+
+      - name: Checkout target PR branch
+        if: steps.validate-pr.outputs.skip != 'true'
+        working-directory: target-repo
+        run: |
+          set -euo pipefail
+          PR_NUMBER="${{ inputs.pr_number }}"
+
+          echo "📦 Checking out PR #$PR_NUMBER..."
+          gh pr checkout "$PR_NUMBER"
+          echo "✅ Target repository prepared"
+
+      - name: Checkout run-actions support files
+        if: steps.validate-pr.outputs.skip != 'true'
+        uses: actions/checkout@v4
+        with:
+          repository: alaudadevops/run-actions
+          ref: ${{ github.workflow_sha }}
+          path: run-actions
+          fetch-depth: 1
+          token: ${{ secrets.TOKEN }}
+          persist-credentials: false
+
+      - name: Prepare opencode config
+        if: steps.validate-pr.outputs.skip != 'true'
+        env:
+          OPENAI_BASEURL: ${{ secrets.OPENAI_BASEURL }}
+          OPENAI_TOKEN: ${{ secrets.OPENAI_TOKEN }}
+          INPUT_MODEL: ${{ inputs.model }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$HOME/.config/opencode"
+          MODEL="${INPUT_MODEL:-$OPENCODE_MODEL}"
+
+          if [[ "$MODEL" == openai/* ]] && [ -z "${OPENAI_TOKEN:-}" ]; then
+            echo "❌ OPENAI_TOKEN is required when using model '$MODEL'"
+            exit 1
+          fi
+
+          cp "run-actions/.github/workflows/opencode.template.json" "$HOME/.config/opencode/opencode.json"
+          echo "✅ Wrote $HOME/.config/opencode/opencode.json"
 
       - name: Prepare OpenCode event payload
+        if: steps.validate-pr.outputs.skip != 'true'
         env:
           INPUT_PROMPT: ${{ inputs.prompt }}
           INPUT_EVENT: ${{ inputs.event_payload }}
+          INPUT_MODEL: ${{ inputs.model }}
+          INPUT_REVIEW_STYLE: ${{ inputs.review_style }}
+          INPUT_DRY_RUN: ${{ inputs.dry_run }}
         run: |
           set -euo pipefail
           PROMPT="${INPUT_PROMPT:-$OPENCODE_REVIEW_PROMPT}"
+          MODEL="${INPUT_MODEL:-$OPENCODE_MODEL}"
 
-          echo "$INPUT_EVENT" > opencode_event.json
+          printf '%s' "$INPUT_EVENT" | jq -c \
+            --arg prompt "$PROMPT" \
+            --arg model "$MODEL" \
+            --arg reviewStyle "$INPUT_REVIEW_STYLE" \
+            --argjson dryRun "$INPUT_DRY_RUN" '
+            .prompt = $prompt
+            | .inputs = (.inputs // {})
+            | .inputs.prompt = $prompt
+            | .inputs.model = $model
+            | .inputs.review_style = $reviewStyle
+            | .inputs.dry_run = $dryRun
+          ' > opencode_event.json
 
-          # # Inject prompt into the event payload for compatibility with pull_request events.
-          # jq -c --arg prompt "$PROMPT" '
-          #   .prompt = $prompt
-          #   | .inputs = (.inputs // {})
-          #   | .inputs.prompt = $prompt
-          # ' "$GITHUB_EVENT_PATH" > opencode_event.json
+          echo "✅ OpenCode event payload prepared"
 
       - name: Run OpenCode GitHub Agent
+        if: steps.validate-pr.outputs.skip != 'true'
+        working-directory: target-repo
         env:
           INPUT_MODEL: ${{ inputs.model }}
-          OPENCODE_GITHUB_TOKEN: ${{ secrets.TOKEN }}
+          OPENCODE_GITHUB_TOKEN: ${{ secrets.OPENCODE_GITHUB_TOKEN }}
+          FALLBACK_GITHUB_TOKEN: ${{ secrets.TOKEN }}
           INPUT_PROMPT: ${{ inputs.prompt }}
         run: |
           set -euo pipefail
@@ -156,5 +297,31 @@ jobs:
           export MODEL
           export PROMPT="${INPUT_PROMPT:-$OPENCODE_REVIEW_PROMPT}"
 
-          TOKEN="${OPENCODE_GITHUB_TOKEN:-$GITHUB_TOKEN}"
-          opencode github run --token "$TOKEN" --event "$(cat opencode_event.json)"
+          TOKEN="${OPENCODE_GITHUB_TOKEN:-$FALLBACK_GITHUB_TOKEN}"
+          opencode github run --token "$TOKEN" --event "$(cat ../opencode_event.json)"
+
+      - name: Update commit status (completed)
+        if: always() && steps.validate-pr.outputs.skip != 'true'
+        run: |
+          REPO="${{ inputs.repository }}"
+          HEAD_SHA="${{ steps.validate-pr.outputs.head_sha }}"
+          WORKFLOW_URL="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+
+          if [ "${{ job.status }}" != "success" ]; then
+            STATE="error"
+            DESCRIPTION="OpenCode review failed"
+          else
+            STATE="success"
+            DESCRIPTION="OpenCode review completed"
+          fi
+
+          gh api "repos/$REPO/statuses/$HEAD_SHA" \
+            --method POST \
+            -f state="$STATE" \
+            -f target_url="$WORKFLOW_URL" \
+            -f description="$DESCRIPTION" \
+            -f context="OpenCode PR Review" || {
+            echo "⚠️ Failed to update commit status"
+          }
+
+          echo "✅ Commit status updated: $STATE - $DESCRIPTION"
