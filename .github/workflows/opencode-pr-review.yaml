@@ -230,6 +230,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: alaudadevops/run-actions
+          ref: ${{ github.workflow_sha }}
           path: run-actions
           fetch-depth: 1
           token: ${{ secrets.TOKEN }}
@@ -240,26 +241,19 @@ jobs:
         env:
           OPENAI_BASEURL: ${{ secrets.OPENAI_BASEURL }}
           OPENAI_TOKEN: ${{ secrets.OPENAI_TOKEN }}
+          INPUT_MODEL: ${{ inputs.model }}
         run: |
           set -euo pipefail
           mkdir -p "$HOME/.config/opencode"
+          MODEL="${INPUT_MODEL:-$OPENCODE_MODEL}"
 
-          python3 <<'PY'
-          import os
-          from pathlib import Path
+          if [[ "$MODEL" == openai/* ]] && [ -z "${OPENAI_TOKEN:-}" ]; then
+            echo "❌ OPENAI_TOKEN is required when using model '$MODEL'"
+            exit 1
+          fi
 
-          template_path = Path("run-actions/.github/workflows/opencode.template.json")
-          output_path = Path.home() / ".config/opencode/opencode.json"
-          content = template_path.read_text()
-          substitutions = {
-              "${OPENAI_BASEURL}": os.environ.get("OPENAI_BASEURL", ""),
-              "${OPENAI_TOKEN}": os.environ.get("OPENAI_TOKEN", ""),
-          }
-          for needle, value in substitutions.items():
-              content = content.replace(needle, value)
-          output_path.write_text(content)
-          print(f"✅ Wrote {output_path}")
-          PY
+          cp "run-actions/.github/workflows/opencode.template.json" "$HOME/.config/opencode/opencode.json"
+          echo "✅ Wrote $HOME/.config/opencode/opencode.json"
 
       - name: Prepare OpenCode event payload
         if: steps.validate-pr.outputs.skip != 'true'

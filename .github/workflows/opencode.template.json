@@ -7,8 +7,8 @@
       "name": "OpenAI",
       "npm": "@ai-sdk/openai",
       "options": {
-        "baseURL": "${OPENAI_BASEURL}",
-        "apiKey": "${OPENAI_TOKEN}"
+        "baseURL": "{env:OPENAI_BASEURL}",
+        "apiKey": "{env:OPENAI_TOKEN}"
       },
       "models": {
         "gpt-5.4": {
