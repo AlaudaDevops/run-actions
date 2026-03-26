@@ -233,14 +233,6 @@ run_load() {
     HAS_ALAUDA_SKILLS=true
     LOADED_SKILLS_CSV="$(jq -r '.[].name' alauda_skills_manifest.json | paste -sd ',' - | sed 's/,/, /g')"
     LOADED_SKILLS_JSON="$(jq -c '[.[].name]' alauda_skills_manifest.json)"
-    cat > alauda_skills_prompt.md << EOF
-Teams: $TEAMS_CSV
-The following Alauda internal skills are available for this review.
-Use skill names as routing hints. Fetch full skill content only when relevant via the native skill tool.
-Do not copy internal policy text verbatim into public PR comments.
-
-EOF
-    jq -r '.[] | "- \(.name): \(.description)"' alauda_skills_manifest.json >> alauda_skills_prompt.md
     echo "✅ Loaded Alauda skills: $LOADED_SKILLS_CSV"
   else
     echo "⚠️ No Alauda skills were loaded"

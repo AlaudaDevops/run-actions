@@ -133,8 +133,8 @@ AI-powered code review for pull requests using OpenCode (current default model: 
 
 - **AI Code Review**: Automated code review using OpenCode with configurable AI models (current default: `codex/gpt-5.3-codex`)
 - **Shared Prompt**: Centralized review guidelines in this repository (`.github/prompts/code-review.md`)
-- **Centralized Repository Profiles**: Repository-specific prompt and review config are managed centrally in this repository (`.github/review/profiles/<owner>/<repo>/`)
-- **Alauda Internal Skills (Optional)**: Bootstrap `alauda-ai-base` + `alauda-ai-builders`, install selected skills to native `.config/opencode/skills`, and expose only skill name/description in prompt
+- **Centralized Repository Profiles**: Repository-specific prompt files are managed centrally in this repository (`.github/review/profiles/<owner>/<repo>/`)
+- **Alauda Internal Skills (Default-On)**: Bootstrap `alauda-ai-base` + `alauda-ai-builders`, then install discovered skills to native `~/.config/opencode/skills` for OpenCode skill discovery
 - **Comment Management**: Creates or updates a single review comment (no spam)
 - **Dry Run Mode**: Test the review without posting comments
 - **Multiple Review Styles**: Strict, balanced, or lenient review approach
@@ -152,58 +152,34 @@ The review uses a layered prompt system:
    - Project conventions, tech stack, and custom rules
    - Optional - falls back to shared prompt only if profile/prompt is not present
 
-3. **Alauda Skill Guidance** (optional, from `skills.include` in config):
-   - Loaded from Alauda internal skill repos using `setup.sh --team ... --team ... --dir ...`
-   - Installed to OpenCode native discovery path (`~/.config/opencode/skills`) and validated with `opencode debug skill`
-   - Prompt includes only skill names/descriptions; full content is fetched on demand via native skill tool
+3. **Alauda Skill Guidance** (enabled by default):
+   - Bootstraps Alauda internal skills using `setup.sh --team devops --dir ...`
+   - Installs discovered skills into OpenCode native path (`~/.config/opencode/skills`) and verifies visibility with `opencode debug skill`
+   - No extra skills catalog section is appended to the review prompt; skill content is resolved through native discovery when needed
+   - Defaults: include all discovered skills (`["*"]`), `fail_on_setup_error=false` (review continues without internal skills if setup fails)
 
-#### Centralized Repository Profile (Optional)
+#### Centralized Repository Profile (optional)
 
-Create repository profile files in this repository:
+Create a repository profile directory in this repository:
 
 ```text
 .github/review/profiles/<owner>/<repo>/
-  config.json
   pr-review.md
 ```
 
 Example (`AlaudaDevops/catalog`):
 
 ```text
-.github/review/profiles/alaudadevops/catalog/config.json
 .github/review/profiles/alaudadevops/catalog/pr-review.md
 ```
 
-`<owner>/<repo>` path matching is case-insensitive. The workflow normalizes `inputs.repository` to lowercase before resolving the profile directory.
-
-`config.json` example:
-
-```json
-{
-  "version": 1,
-  "prompt": {
-    "path": "pr-review.md"
-  },
-  "skills": {
-    "enabled": true,
-    "teams": ["devops"],
-    "fail_on_setup_error": false,
-    "include": [
-      "builders-sample-code-review",
-      "devops-tekton-dynamic-form-optimizer"
-    ]
-  }
-}
-```
+Repository matching is case-insensitive. The workflow normalizes `inputs.repository` to lowercase before resolving `<owner>/<repo>`.
 
 Rules:
-- `prompt.path` is relative to the profile directory and cannot escape it
-- `skills.teams` is required (non-empty array) when `skills.enabled=true`; `skills.team` is no longer supported
-- `skills.include` accepts skill directory names (e.g. `devops-task-overview-template`)
-- Set `skills.include` to `["*"]` to include all discovered skills for the configured `skills.teams` (no per-skill listing required)
-- Profiles are resolved by target repository in a case-insensitive way (`owner/repo` is normalized to lowercase)
-- Config and prompt are loaded from the `run-actions` workflow revision (`github.sha`)
-- If profile/config/prompt is missing, workflow continues with shared prompt only and skills disabled
+- `pr-review.md` is the only supported profile prompt filename
+- Prompt content is loaded from the `run-actions` workflow revision (`github.sha`)
+- If the profile directory or `pr-review.md` is missing, the workflow falls back to shared prompt only
+- Skill loading is independent of profile files and uses defaults: team `devops`, include `["*"]`, `fail_on_setup_error=false`
 
 #### Usage
 
@@ -248,8 +224,6 @@ jobs:
 **Add repository profile to run-actions:**
 
 1. Create `.github/review/profiles/<owner>/<repo>/pr-review.md` for repository-specific guidance (recommend using lowercase owner/repo path).
-2. (Optional) Create `.github/review/profiles/<owner>/<repo>/config.json` to enable skills and customize prompt path.
-3. Start from [`.github/examples/review-config.json`](.github/examples/review-config.json).
 
 #### Configuration Options
 

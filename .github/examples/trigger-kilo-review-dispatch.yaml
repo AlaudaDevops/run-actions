@@ -27,6 +27,7 @@ jobs:
             --repo alaudadevops/run-actions \
             --field repository="${{ github.repository }}" \
             --field pr_number="${{ github.event.pull_request.number }}" \
+            --field model="anthropic/claude-sonnet-4-20250514" \
             --field review_style="balanced"
 
           echo "✅ Kilo PR Review triggered for PR #${{ github.event.pull_request.number }}"
@@ -55,13 +56,20 @@ jobs:
           COMMENT_BODY="${{ github.event.comment.body }}"
 
           # Default values
+          MODEL="anthropic/claude-sonnet-4-20250514"
           STYLE="balanced"
+
+          # Parse --model option
+          if echo "$COMMENT_BODY" | grep -q -- '--model'; then
+            MODEL=$(echo "$COMMENT_BODY" | grep -oP -- '--model\s+\K\S+' || echo "$MODEL")
+          fi
 
           # Parse --style option
           if echo "$COMMENT_BODY" | grep -q -- '--style'; then
             STYLE=$(echo "$COMMENT_BODY" | grep -oP -- '--style\s+\K\S+' || echo "$STYLE")
           fi
 
+          echo "model=$MODEL" >> $GITHUB_OUTPUT
           echo "style=$STYLE" >> $GITHUB_OUTPUT
 
       - name: Trigger Kilo PR Review
@@ -72,6 +80,7 @@ jobs:
             --repo alaudadevops/run-actions \
             --field repository="${{ github.repository }}" \
             --field pr_number="$PR_NUMBER" \
+            --field model="${{ steps.parse-options.outputs.model }}" \
             --field review_style="${{ steps.parse-options.outputs.style }}"
 
           echo "✅ Kilo PR Review triggered for PR #$PR_NUMBER"

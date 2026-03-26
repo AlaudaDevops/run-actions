@@ -66,7 +66,6 @@ env:
   SHARED_PROMPT_PATH: ".github/prompts/code-review.md"
   CENTRAL_REVIEW_PROFILE_ROOT: ".github/review/profiles"
   DEFAULT_PROFILE_PROMPT_FILE: "pr-review.md"
-  PROFILE_CONFIG_FILE: "config.json"
   ALAUDA_DEFAULT_TEAM: "devops"
   ALAUDA_BASE_REPO: "AlaudaDevops/alauda-ai-base"
   ALAUDA_BUILDERS_REPO: "AlaudaDevops/alauda-ai-builders"
@@ -216,21 +215,20 @@ jobs:
             exit 1;
           fi
 
-      - name: Load centralized review profile config (if exists)
+      - name: Resolve centralized review defaults
         if: steps.validate-pr.outputs.skip != 'true'
         id: repo-review-config
         shell: bash
         env:
           REPO_INPUT: ${{ inputs.repository }}
           PROFILE_ROOT: ${{ env.CENTRAL_REVIEW_PROFILE_ROOT }}
-          PROFILE_CONFIG_FILE: ${{ env.PROFILE_CONFIG_FILE }}
           DEFAULT_PROMPT_FILE: ${{ env.DEFAULT_PROFILE_PROMPT_FILE }}
           DEFAULT_TEAM: ${{ env.ALAUDA_DEFAULT_TEAM }}
           CONFIG_SOURCE: centralized
           RUN_ACTIONS_DIR: run-actions
           PROFILE_REF_FALLBACK: ${{ github.sha }}
         run: |
-          run-actions/.github/workflows/scripts/kilo_resolve_review_config.sh
+          run-actions/.github/workflows/scripts/resolve_review_config.sh
 
       - name: Load personalized prompt from centralized profile (if exists)
         if: steps.validate-pr.outputs.skip != 'true'
@@ -273,7 +271,7 @@ jobs:
           BASE_REPO: ${{ env.ALAUDA_BASE_REPO }}
           BUILDERS_REPO: ${{ env.ALAUDA_BUILDERS_REPO }}
         run: |
-          run-actions/.github/workflows/scripts/kilo_setup_and_load_skills.sh bootstrap
+          run-actions/.github/workflows/scripts/setup_and_load_skills.sh bootstrap
 
       - name: Load configured Alauda skills (optional)
         if: steps.validate-pr.outputs.skip != 'true' && steps.repo-review-config.outputs.skills_requested == 'true' && steps.alauda-skill-setup.outputs.skills_ready == 'true'
@@ -285,7 +283,7 @@ jobs:
           TEAMS_CSV: ${{ steps.repo-review-config.outputs.skills_teams_csv }}
           FAIL_ON_SETUP: ${{ steps.repo-review-config.outputs.skills_fail_on_setup_error }}
         run: |
-          run-actions/.github/workflows/scripts/kilo_setup_and_load_skills.sh load
+          run-actions/.github/workflows/scripts/setup_and_load_skills.sh load
 
       - name: Prepare review prompt
         if: steps.validate-pr.outputs.skip != 'true'
@@ -302,7 +300,6 @@ jobs:
           DELETIONS="${{ steps.validate-pr.outputs.deletions }}"
           CHANGED_FILES="${{ steps.validate-pr.outputs.changed_files }}"
           REVIEW_STYLE="${{ inputs.review_style }}"
-          HAS_REPO_CONFIG="${{ steps.repo-review-config.outputs.has_repo_config }}"
           PROFILE_FOUND="${{ steps.repo-review-config.outputs.profile_found }}"
           PROFILE_PATH="${{ steps.repo-review-config.outputs.profile_path }}"
           PROFILE_REF="${{ steps.repo-review-config.outputs.profile_ref }}"
@@ -311,9 +308,7 @@ jobs:
           PROMPT_PATH="${{ steps.personalized-prompt.outputs.prompt_path }}"
           HAS_ALAUDA_SKILLS="${{ steps.alauda-skill-prompt.outputs.has_alauda_skills }}"
           LOADED_ALAUDA_SKILLS="${{ steps.alauda-skill-prompt.outputs.loaded_skills }}"
-          REPO_CONFIG_PATH="${{ steps.repo-review-config.outputs.config_path }}"
 
-          HAS_REPO_CONFIG="${HAS_REPO_CONFIG:-false}"
           PROFILE_FOUND="${PROFILE_FOUND:-false}"
           PROFILE_PATH="${PROFILE_PATH:-none}"
           PROFILE_REF="${PROFILE_REF:-${{ github.sha }}}"
@@ -321,7 +316,6 @@ jobs:
           HAS_ALAUDA_SKILLS="${HAS_ALAUDA_SKILLS:-false}"
           LOADED_ALAUDA_SKILLS="${LOADED_ALAUDA_SKILLS:-none}"
           PROMPT_PATH="${PROMPT_PATH:-${PROFILE_PATH}/${{ env.DEFAULT_PROFILE_PROMPT_FILE }}}"
-          REPO_CONFIG_PATH="${REPO_CONFIG_PATH:-${PROFILE_PATH}/${{ env.PROFILE_CONFIG_FILE }}}"
 
           # Base prompt always includes shared guidance and run metadata.
           cat > review_prompt.md << EOF
@@ -337,7 +331,6 @@ jobs:
           - **Review Style**: $REVIEW_STYLE
           - **Config Source**: $CONFIG_SOURCE
           - **Profile**: $([ "$PROFILE_FOUND" = "true" ] && echo "$PROFILE_PATH @ $PROFILE_REF" || echo "Not Found")
-          - **Repository Review Config**: $([ "$HAS_REPO_CONFIG" = "true" ] && echo "Found ($REPO_CONFIG_PATH)" || echo "Not Found")
           - **Repository Prompt Path**: $PROMPT_PATH
           - **Alauda Skills**: $([ "$HAS_ALAUDA_SKILLS" = "true" ] && echo "$LOADED_ALAUDA_SKILLS" || echo "disabled")
 
@@ -354,17 +347,6 @@ jobs:
           ## Repository-Specific Guidelines
 
           $(cat personalized_prompt.md)
-
-          EOF
-          fi
-
-          # Append skills catalog section only when we actually loaded skills.
-          if [ "$HAS_ALAUDA_SKILLS" = "true" ] && [ -f alauda_skills_prompt.md ]; then
-            cat >> review_prompt.md << EOF
-
-          ## Alauda Internal Skills (Read On Demand)
-
-          $(cat alauda_skills_prompt.md)
 
           EOF
           fi
@@ -440,7 +422,7 @@ jobs:
           run_review() {
             local model="$1"
 
-            rm -f pr-overview.md status
+            rm -f pr-overview.md status issue_count
 
             echo "Using model: $model"
             echo "Review this PR according to the guidelines in the system prompt" \
@@ -476,18 +458,6 @@ jobs:
             cat pr-overview.md
             echo "------------------------"
             HAS_OVERVIEW=true
-
-            # Best-effort issue count parsed from overview statistics table.
-            # Treat "issues" as blocking+warning findings (exclude suggestions).
-            CRITICAL_COUNT="$(awk -F'|' '/\|\s*Critical Issues\s*\|/ {gsub(/ /, "", $3); print $3; exit}' pr-overview.md)"
-            WARNING_COUNT="$(awk -F'|' '/\|\s*Warnings\s*\|/ {gsub(/ /, "", $3); print $3; exit}' pr-overview.md)"
-            CRITICAL_COUNT="${CRITICAL_COUNT:-0}"
-            WARNING_COUNT="${WARNING_COUNT:-0}"
-            if [[ "$CRITICAL_COUNT" =~ ^[0-9]+$ ]] && [[ "$WARNING_COUNT" =~ ^[0-9]+$ ]]; then
-              COMMENT_COUNT=$((CRITICAL_COUNT + WARNING_COUNT))
-            else
-              COMMENT_COUNT=0
-            fi
           else
             echo "❌ No review output found"
             echo "No review output generated" > ../review_output.md
@@ -501,6 +471,13 @@ jobs:
             echo "------------------------"
             HAS_STATUS=true
             PR_STATUS="$(cat status)"
+          fi
+
+          if ISSUE_COUNT_RAW="$(tr -d '[:space:]' < issue_count 2>/dev/null)" && [[ "$ISSUE_COUNT_RAW" =~ ^[0-9]+$ ]]; then
+            COMMENT_COUNT="$ISSUE_COUNT_RAW"
+            echo "✅ Issue count loaded from issue_count: $COMMENT_COUNT"
+          else
+            echo "ℹ️ issue_count missing or invalid. Using comment_count=0"
           fi
 
 
@@ -529,8 +506,6 @@ jobs:
           COMMENT_COUNT="${{ steps.opencode-review.outputs.comment_count }}"
           REVIEW_STYLE="${{ inputs.review_style }}"
           HAS_PERSONALIZED="${{ steps.personalized-prompt.outputs.has_personalized }}"
-          HAS_REPO_CONFIG="${{ steps.repo-review-config.outputs.has_repo_config }}"
-          REPO_CONFIG_PATH="${{ steps.repo-review-config.outputs.config_path }}"
           PROFILE_FOUND="${{ steps.repo-review-config.outputs.profile_found }}"
           PROFILE_PATH="${{ steps.repo-review-config.outputs.profile_path }}"
           PROFILE_REF="${{ steps.repo-review-config.outputs.profile_ref }}"
@@ -541,14 +516,12 @@ jobs:
           MARKER="${{ env.REVIEW_COMMENT_MARKER }}"
           WORKFLOW_URL="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
 
-          HAS_REPO_CONFIG="${HAS_REPO_CONFIG:-false}"
           PROFILE_FOUND="${PROFILE_FOUND:-false}"
           PROFILE_PATH="${PROFILE_PATH:-none}"
           PROFILE_REF="${PROFILE_REF:-${{ github.sha }}}"
           CONFIG_SOURCE="${CONFIG_SOURCE:-centralized}"
           HAS_ALAUDA_SKILLS="${HAS_ALAUDA_SKILLS:-false}"
           LOADED_ALAUDA_SKILLS="${LOADED_ALAUDA_SKILLS:-None}"
-          REPO_CONFIG_PATH="${REPO_CONFIG_PATH:-${PROFILE_PATH}/${{ env.PROFILE_CONFIG_FILE }}}"
           PROMPT_PATH="${PROMPT_PATH:-${PROFILE_PATH}/${{ env.DEFAULT_PROFILE_PROMPT_FILE }}}"
 
           echo "📝 Preparing overview comment..."
@@ -566,7 +539,6 @@ jobs:
           | **Issues Found** | ${COMMENT_COUNT:-0} |
           | **Config Source** | $CONFIG_SOURCE |
           | **Profile** | $([ "$PROFILE_FOUND" = "true" ] && echo "\`$PROFILE_PATH\` @ \`$PROFILE_REF\`" || echo "❌ Not Found") |
-          | **Repository Config** | $([ "$HAS_REPO_CONFIG" = "true" ] && echo "✅ $REPO_CONFIG_PATH" || echo "❌ Not Found") |
           | **Personalized Prompt** | $([ "$HAS_PERSONALIZED" = "true" ] && echo "✅ Yes" || echo "❌ No") |
           | **Prompt Path** | \`$PROMPT_PATH\` |
           | **Alauda Skills** | $([ "$HAS_ALAUDA_SKILLS" = "true" ] && echo "✅ $LOADED_ALAUDA_SKILLS" || echo "❌ Disabled") |
@@ -587,7 +559,6 @@ jobs:
           - **Config source**: \`$CONFIG_SOURCE\`
           - **Profile path**: $([ "$PROFILE_FOUND" = "true" ] && echo "\`$PROFILE_PATH\`" || echo "*Not Found*")
           - **Profile ref**: \`$PROFILE_REF\`
-          - **Repository config path**: \`$REPO_CONFIG_PATH\`
           $([ "$HAS_PERSONALIZED" = "true" ] && echo "- **Repository prompt**: \`$PROMPT_PATH\`" || echo "- *No repository-specific prompt configured*")
           $([ "$HAS_ALAUDA_SKILLS" = "true" ] && echo "- **Alauda skills**: $LOADED_ALAUDA_SKILLS" || echo "- *Alauda internal skills disabled*")
 
@@ -658,12 +629,6 @@ jobs:
           echo "## Overview:"
           cat review_output.md
           echo ""
-          echo "## Inline Comments (JSON):"
-          if [ -f review_comments.json ]; then
-            cat review_comments.json | jq .
-          else
-            echo "{}"
-          fi
           echo "================================"
           echo "ℹ️ In non-dry-run mode, this would be posted to the PR"
 

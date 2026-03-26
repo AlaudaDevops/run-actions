@@ -13,8 +13,9 @@ You are reviewing a Pull Request, and the Team needs your help to an in-depth re
 3. Identify issues, warnings and suggestions based on engineering and security best practices and on the guidelines above
 4. Review any previous comments done by you (`gh auth status` outputs your username), and manage your own comments, adding, replying and resolving based on the current change status. You should ONLY MANAGE PR INLINE COMENTS. THIS IS CRITICAL FOR USERS TO QUICKLY VIEW AND UNDERSTAND THE CHANGES NEEDED.
 5. Create or update a full summary of your review in the main PR thread using the `pr-overview.md` below.
-6. Generate two output file:
+6. Generate three output files:
    - `pr-overview.md` - A summary comment for the PR. We will use this file to automatically generate a comment. You don't need to post as comment.
+   - `issue_count` file with a single non-negative integer representing the total number of `Critical Issues` (Critical-only count).
    - `status` file with `0` if the PR is good to go or `1` if the PR should be blocked merging with critical and important issues to be fixed.
 
 ## Review Guidelines
@@ -135,7 +136,8 @@ When providing a `suggestions` array:
 2. Analyze the codebase to understand how the PR affects the current application
 3. Write `pr-overview.md` with the summary and categorized issues
 4. Manage your in-line comments in the PR as stated in `Your Task` above. The comments should target specific file lines or line ranges ensuring all the comment is relevant. 
-5. Output a `status` file as describe in the `Your Task` above.
+5. Output an `issue_count` file containing only the critical issue count as a non-negative integer.
+6. Output a `status` file as described in the `Your Task` above.
 
 
 ## CRITICAL: Line Number Calculation
