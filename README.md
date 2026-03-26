@@ -127,30 +127,83 @@ Advanced documentation synchronization between repositories with sophisticated c
 
 ### Kilo PR Review (`kilo-pr-review.yaml`)
 
-AI-powered code review for pull requests using [Kilo Code CLI](https://kilo.ai).
+AI-powered code review for pull requests using OpenCode (current default model: `codex/gpt-5.3-codex`).
 
 #### Features
 
-- **AI Code Review**: Automated code review using Kilo CLI with configurable AI models
-- **Shared Prompt**: Centralized review guidelines in this repository
-- **Personalized Prompts**: Repository-specific review rules per project
+- **AI Code Review**: Automated code review using OpenCode with configurable AI models (current default: `codex/gpt-5.3-codex`)
+- **Shared Prompt**: Centralized review guidelines in this repository (`.github/prompts/code-review.md`)
+- **Centralized Repository Profiles**: Repository-specific prompt and review config are managed centrally in this repository (`.github/review/profiles/<owner>/<repo>/`)
+- **Alauda Internal Skills (Optional)**: Bootstrap `alauda-ai-base` + `alauda-ai-builders`, install selected skills to native `.config/opencode/skills`, and expose only skill name/description in prompt
 - **Comment Management**: Creates or updates a single review comment (no spam)
-- **PR Review Submission**: Submits formal GitHub PR review
 - **Dry Run Mode**: Test the review without posting comments
 - **Multiple Review Styles**: Strict, balanced, or lenient review approach
 
 #### Prompts
 
-The review uses a two-tier prompt system:
+The review uses a layered prompt system:
 
-1. **Shared Prompt** (`.github/prompts/pr-review-shared.md` in this repo):
+1. **Shared Prompt** (`.github/prompts/code-review.md` in this repo):
    - Common review guidelines for all repositories
    - Code quality, security, performance, and best practices
 
-2. **Personalized Prompt** (`.github/prompts/pr-review.md` in target repo):
+2. **Repository Prompt** (default `pr-review.md` in centralized profile):
    - Repository-specific guidelines
    - Project conventions, tech stack, and custom rules
-   - Optional - falls back to shared prompt only if not present
+   - Optional - falls back to shared prompt only if profile/prompt is not present
+
+3. **Alauda Skill Guidance** (optional, from `skills.include` in config):
+   - Loaded from Alauda internal skill repos using `setup.sh --team ... --team ... --dir ...`
+   - Installed to OpenCode native discovery path (`~/.config/opencode/skills`) and validated with `opencode debug skill`
+   - Prompt includes only skill names/descriptions; full content is fetched on demand via native skill tool
+
+#### Centralized Repository Profile (Optional)
+
+Create repository profile files in this repository:
+
+```text
+.github/review/profiles/<owner>/<repo>/
+  config.json
+  pr-review.md
+```
+
+Example (`AlaudaDevops/catalog`):
+
+```text
+.github/review/profiles/alaudadevops/catalog/config.json
+.github/review/profiles/alaudadevops/catalog/pr-review.md
+```
+
+`<owner>/<repo>` path matching is case-insensitive. The workflow normalizes `inputs.repository` to lowercase before resolving the profile directory.
+
+`config.json` example:
+
+```json
+{
+  "version": 1,
+  "prompt": {
+    "path": "pr-review.md"
+  },
+  "skills": {
+    "enabled": true,
+    "teams": ["devops"],
+    "fail_on_setup_error": false,
+    "include": [
+      "builders-sample-code-review",
+      "devops-tekton-dynamic-form-optimizer"
+    ]
+  }
+}
+```
+
+Rules:
+- `prompt.path` is relative to the profile directory and cannot escape it
+- `skills.teams` is required (non-empty array) when `skills.enabled=true`; `skills.team` is no longer supported
+- `skills.include` accepts skill directory names (e.g. `devops-task-overview-template`)
+- Set `skills.include` to `["*"]` to include all discovered skills for the configured `skills.teams` (no per-skill listing required)
+- Profiles are resolved by target repository in a case-insensitive way (`owner/repo` is normalized to lowercase)
+- Config and prompt are loaded from the `run-actions` workflow revision (`github.sha`)
+- If profile/config/prompt is missing, workflow continues with shared prompt only and skills disabled
 
 #### Usage
 
@@ -160,7 +213,6 @@ gh workflow run kilo-pr-review.yaml \
   --repo alaudadevops/run-actions \
   -f repository="alaudadevops/my-project" \
   -f pr_number="123" \
-  -f model="anthropic/claude-sonnet-4-20250514" \
   -f review_style="balanced" \
   -f dry_run=false
 ```
@@ -180,7 +232,7 @@ on:
 jobs:
   trigger-review:
     runs-on: ubuntu-latest
-    if: github.event.pull_request.draft != true
+    if: github.actor != 'dependabot[bot]' && (github.event_name != 'pull_request' || github.event.pull_request.draft != true)
     steps:
       - name: Trigger Kilo PR Review
         run: |
@@ -188,15 +240,16 @@ jobs:
             --repo alaudadevops/run-actions \
             --field repository="${{ github.repository }}" \
             --field pr_number="${{ github.event.pull_request.number }}" \
-            --field model="anthropic/claude-sonnet-4-20250514" \
             --field review_style="balanced"
         env:
           GH_TOKEN: ${{ secrets.RUN_ACTIONS_TOKEN }}
 ```
 
-**Add a personalized prompt to your repository:**
+**Add repository profile to run-actions:**
 
-Create `.github/prompts/pr-review.md` in your repository with project-specific guidelines. See `.github/examples/pr-review-personalized.md` for a template.
+1. Create `.github/review/profiles/<owner>/<repo>/pr-review.md` for repository-specific guidance (recommend using lowercase owner/repo path).
+2. (Optional) Create `.github/review/profiles/<owner>/<repo>/config.json` to enable skills and customize prompt path.
+3. Start from [`.github/examples/review-config.json`](.github/examples/review-config.json).
 
 #### Configuration Options
 
@@ -204,14 +257,14 @@ Create `.github/prompts/pr-review.md` in your repository with project-specific g
 |-----------|-------------|---------|
 | `repository` | Target repository (owner/repo) | Required |
 | `pr_number` | Pull request number | Required |
-| `model` | AI model to use | `anthropic/claude-sonnet-4-20250514` |
-| `review_style` | Review strictness (strict/balanced/lenient) | `balanced` |
+| `review_style` | Review strictness (strict/balanced/lenient) | `strict` |
 | `dry_run` | Test mode without posting comments | `false` |
 
 #### Required Secrets
 
 - `TOKEN`: GitHub token with repo access to target repositories
-- `KILO_API_KEY`: API key for the AI provider (e.g., Anthropic API key)
+- `OPENAI_TOKEN`: API key for OpenAI-compatible endpoint (required for current default model setup)
+- `OPENAI_BASEURL`: Optional custom OpenAI-compatible endpoint
 - `RUN_ACTIONS_TOKEN` (in your repo): Token to trigger workflows in run-actions
 
 #### On-Demand Review via Comment
@@ -221,7 +274,7 @@ Using the alternative workflow (`.github/examples/trigger-kilo-review-dispatch.y
 ```
 /kilo-review
 /kilo-review --style strict
-/kilo-review --model anthropic/claude-sonnet-4-20250514 --style lenient
+/kilo-review --style lenient
 ```
 
 ## Claude Code Review Skill

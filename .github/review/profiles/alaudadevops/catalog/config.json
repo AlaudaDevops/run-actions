@@ -1,0 +1,16 @@
+{
+  "version": 1,
+  "prompt": {
+    "path": "pr-review.md"
+  },
+  "skills": {
+    "enabled": true,
+    "teams": ["devops"],
+    "fail_on_setup_error": false,
+    "include": [
+      "devops-tekton-task-generator",
+      "devops-tekton-dynamic-form-optimizer",
+      "devops-task-overview-template"
+    ]
+  }
+}
