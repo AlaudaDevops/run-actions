@@ -65,7 +65,9 @@ env:
   REVIEW_COMMENT_MARKER: "<!-- kilo-pr-review-comment -->"
   SHARED_PROMPT_PATH: ".github/prompts/code-review.md"
   PERSONALIZED_PROMPT_PATH: ".github/prompts/pr-review.md"
+  OPENCODE_MODE: "oss" # "codex" "oss" "auto"
   OPENCODE_MODEL: "codex/gpt-5.3-codex"
+  OPENCODE_FALLBACK_MODEL: "opencode/minimax-m2.5-free"
 
 jobs:
   review-pr:
@@ -276,15 +278,39 @@ jobs:
 
       - name: Prepare opencode config
         if: steps.validate-pr.outputs.skip != 'true'
+        id: opencode-config
         env:
           OPENAI_BASEURL: ${{ secrets.OPENAI_BASEURL }}
           OPENAI_TOKEN: ${{ secrets.OPENAI_TOKEN }}
         run: |
           set -euo pipefail
           mkdir -p "$HOME/.config/opencode"
-          MODEL="${OPENCODE_MODEL}"
+          case "${OPENCODE_MODE}" in
+            codex)
+              MODEL="${OPENCODE_MODEL}"
+              ;;
+            oss)
+              MODEL="${OPENCODE_FALLBACK_MODEL}"
+              ;;
+            auto)
+              if [ -n "${OPENAI_TOKEN:-}" ]; then
+                MODEL="${OPENCODE_MODEL}"
+              else
+                MODEL="${OPENCODE_FALLBACK_MODEL}"
+              fi
+              ;;
+            *)
+              echo "❌ Unsupported OPENCODE_MODE: ${OPENCODE_MODE}"
+              exit 1
+              ;;
+          esac
 
-          if [[ "$MODEL" == openai/* ]] && [ -z "${OPENAI_TOKEN:-}" ]; then
+          if [ -z "${MODEL:-}" ]; then
+            echo "❌ No model resolved for OPENCODE_MODE=${OPENCODE_MODE}"
+            exit 1
+          fi
+
+          if [[ "$MODEL" == openai/* || "$MODEL" == codex/* ]] && [ -z "${OPENAI_TOKEN:-}" ]; then
             echo "❌ OPENAI_TOKEN is required when using model '$MODEL'"
             exit 1
           fi
@@ -292,6 +318,8 @@ jobs:
           cp "run-actions/.github/workflows/opencode.template.json" "$HOME/.config/opencode/opencode.json"
           cat $HOME/.config/opencode/opencode.json
           echo "✅ Wrote $HOME/.config/opencode/opencode.json"
+          echo "mode=${OPENCODE_MODE}" >> "$GITHUB_OUTPUT"
+          echo "selected_model=${MODEL}" >> "$GITHUB_OUTPUT"
 
       - name: Run AI review
         if: steps.validate-pr.outputs.skip != 'true'
@@ -305,9 +333,35 @@ jobs:
 
           echo "🤖 Starting AI code review..."
 
-          echo "Review this PR according to the guidelines in the system prompt" | opencode run --model $OPENCODE_MODEL --file ../review_prompt.md | tee ../kilo_output.log
+          MODEL="${{ steps.opencode-config.outputs.selected_model }}"
+          USED_FALLBACK=false
 
-          OPENCODE_EXIT_CODE=${PIPESTATUS[0]}
+          run_review() {
+            local model="$1"
+
+            rm -f pr-overview.md status
+
+            echo "Using model: $model"
+            echo "Review this PR according to the guidelines in the system prompt" \
+              | opencode run --model "$model" --file ../review_prompt.md \
+              | tee ../kilo_output.log
+          }
+
+          has_review_outputs() {
+            [ -f "pr-overview.md" ] || [ -f "status" ]
+          }
+
+          if run_review "$MODEL" && has_review_outputs; then
+            :
+          elif [ "${OPENCODE_MODE}" = "auto" ] && [ "$MODEL" != "${OPENCODE_FALLBACK_MODEL}" ] && [ -n "${OPENCODE_FALLBACK_MODEL}" ]; then
+            echo "⚠️ Primary model failed or produced no outputs. Retrying with fallback model..."
+            MODEL="${OPENCODE_FALLBACK_MODEL}"
+            USED_FALLBACK=true
+            run_review "$MODEL"
+          else
+            echo "❌ Opencode review failed with model '$MODEL'"
+            exit 1
+          fi
 
           PR_STATUS=0
           HAS_OVERVIEW=false
@@ -347,13 +401,15 @@ jobs:
           echo "has_overview=$HAS_OVERVIEW" >> $GITHUB_OUTPUT
           echo "has_status=$HAS_STATUS" >> $GITHUB_OUTPUT
           echo "pr_status=$PR_STATUS" >> $GITHUB_OUTPUT
+          echo "effective_model=$MODEL" >> "$GITHUB_OUTPUT"
+          echo "used_fallback=$USED_FALLBACK" >> "$GITHUB_OUTPUT"
 
       - name: Post overview comment
         if: steps.validate-pr.outputs.skip != 'true' && inputs.dry_run != true
         run: |
           REPO="${{ inputs.repository }}"
           PR_NUMBER="${{ inputs.pr_number }}"
-          MODEL="$OPENCODE_MODEL"
+          MODEL="${{ steps.opencode-review.outputs.effective_model }}"
           REVIEW_STYLE="${{ inputs.review_style }}"
           HAS_PERSONALIZED="${{ steps.personalized-prompt.outputs.has_personalized }}"
           MARKER="${{ env.REVIEW_COMMENT_MARKER }}"
@@ -467,7 +523,7 @@ jobs:
           SKIP="${{ steps.validate-pr.outputs.skip }}"
           DRY_RUN="${{ inputs.dry_run }}"
           COMMENT_COUNT="${{ steps.opencode-review.outputs.comment_count }}"
-          MODEL="$OPENCODE_MODEL"
+          MODEL="${{ steps.opencode-review.outputs.effective_model }}"
 
           REVIEW_STYLE="${{ inputs.review_style }}"
 
