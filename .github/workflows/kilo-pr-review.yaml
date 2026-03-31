@@ -353,7 +353,37 @@ jobs:
 
           cat >> review_prompt.md << 'EOF'
 
+          ## CRITICAL FIRST STEP: Load Required Skills
+
+          Before starting your review, you MUST load the `gh-cli` skill using the skill tool.
+          This skill contains essential instructions for:
+          - Creating inline PR review comments via the GitHub Pull Request Reviews API
+          - Managing existing review comments (list, update, delete, reply, resolve threads)
+          - Proper line number calculation for diff-based comments
+          - The complete code review workflow
+
+          Run the skill tool with name "gh-cli" BEFORE performing any other action.
+          Without this skill, you will not have the correct API patterns for inline PR comments.
+
           EOF
+
+          # Add dry_run instructions if applicable
+          DRY_RUN="${{ inputs.dry_run }}"
+          if [ "$DRY_RUN" = "true" ]; then
+            cat >> review_prompt.md << 'EOF'
+
+          ## DRY RUN MODE
+
+          This review is running in DRY RUN mode. You MUST NOT:
+          - Post any inline review comments to the PR
+          - Create any PR reviews via the GitHub API
+          - Modify or delete any existing comments
+
+          Instead, write all your review findings ONLY to the output files (pr-overview.md, issue_count, status).
+          You may still READ PR information (diff, files, existing comments) but DO NOT WRITE anything to the PR.
+
+          EOF
+          fi
 
           echo "✅ Review prompt prepared ($(wc -l < review_prompt.md) lines)"
           cat review_prompt.md
@@ -403,6 +433,47 @@ jobs:
           echo "✅ Wrote $HOME/.config/opencode/opencode.json"
           echo "mode=${OPENCODE_MODE}" >> "$GITHUB_OUTPUT"
           echo "selected_model=${MODEL}" >> "$GITHUB_OUTPUT"
+
+      - name: Install built-in skills
+        if: steps.validate-pr.outputs.skip != 'true'
+        run: |
+          set -euo pipefail
+          SKILLS_SRC="run-actions/.github/skills"
+          SKILLS_DEST="$HOME/.config/opencode/skills"
+          mkdir -p "$SKILLS_DEST"
+
+          INSTALLED_SKILLS=()
+
+          if [ -d "$SKILLS_SRC" ]; then
+            for skill_dir in "$SKILLS_SRC"/*/; do
+              [ -d "$skill_dir" ] || continue
+              skill_name="$(basename "$skill_dir")"
+              if [ -f "$skill_dir/SKILL.md" ]; then
+                rm -rf "$SKILLS_DEST/$skill_name"
+                cp -R "$skill_dir" "$SKILLS_DEST/$skill_name"
+                INSTALLED_SKILLS+=("$skill_name")
+                echo "✅ Installed built-in skill: $skill_name"
+              fi
+            done
+          fi
+
+          if [ "${#INSTALLED_SKILLS[@]}" -gt 0 ]; then
+            echo "📋 Installed ${#INSTALLED_SKILLS[@]} built-in skill(s): ${INSTALLED_SKILLS[*]}"
+          else
+            echo "ℹ️ No built-in skills found in $SKILLS_SRC"
+          fi
+
+          # Verify required skill: gh-cli
+          if [ ! -f "$SKILLS_DEST/gh-cli/SKILL.md" ]; then
+            echo "❌ Required skill 'gh-cli' was not installed. Check $SKILLS_SRC/gh-cli/SKILL.md exists."
+            exit 1
+          fi
+
+          # Verify skill discovery if opencode is available
+          if command -v opencode &>/dev/null; then
+            echo "🔍 Verifying skill discovery..."
+            opencode debug skill 2>/dev/null || echo "⚠️ Could not verify skill discovery (non-fatal)"
+          fi
 
       - name: Run AI review
         if: steps.validate-pr.outputs.skip != 'true'
