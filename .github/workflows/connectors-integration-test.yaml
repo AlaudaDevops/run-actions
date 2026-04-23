@@ -67,6 +67,11 @@ jobs:
         uses: actions/checkout@v4
         with:
           path: run-actions
+          # Don't persist an extraheader credential globally — it leaks
+          # into `go mod`'s git fallback for unrelated github.com repos
+          # and triggers "could not read Username" on public modules
+          # when the persisted token's scope doesn't match.
+          persist-credentials: false
 
       - name: Resolve PR head ref and SHA
         id: pr
@@ -119,12 +124,21 @@ jobs:
           path: connectors
           token: ${{ secrets.TOKEN }}
           fetch-depth: 1
+          # Don't keep the credential in git config — it makes `go mod`'s
+          # git fallback prompt for a username on unrelated public
+          # modules.
+          persist-credentials: false
 
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
           go-version-file: connectors/go.mod
-          cache-dependency-path: connectors/go.sum
+          # Both go.sum files — connectors/ is its own module but the BDD
+          # suite under testing/ has a separate go.mod with different
+          # dependency pins (including the AlaudaDevops/bdd pseudo-version).
+          cache-dependency-path: |
+            connectors/go.sum
+            connectors/testing/go.sum
 
       - name: Set up ko
         uses: ko-build/setup-ko@v0.8
