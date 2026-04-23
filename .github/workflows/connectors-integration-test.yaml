@@ -1,0 +1,307 @@
+name: Connectors Integration Test
+
+# This workflow runs the BDD integration suite of the AlaudaDevops/connectors
+# repository against a GitHub-hosted Kind cluster, on a public-images-only
+# runtime. It is the GitHub Actions port of the Tekton
+# `kind-integration-test/0.3` pipeline maintained in the edge-devops-task repo.
+#
+# Versioning: callers should pin to a git tag such as
+# `connectors-integration-test-v1`. Breaking changes get a new tag and the
+# caller bumps its `--ref=` flag.
+#
+# The caller (a workflow in the connectors repo) invokes this via
+#   gh workflow run connectors-integration-test.yaml
+#     --repo AlaudaDevops/run-actions
+#     --ref  connectors-integration-test-v1
+#     --field repository=AlaudaDevops/connectors
+#     --field pr_number=123
+#     --field head_sha=<sha>
+# with `GH_TOKEN: ${{ secrets.RUN_ACTIONS_TOKEN }}` in the caller env.
+
+on:
+  workflow_dispatch:
+    inputs:
+      repository:
+        description: "Target repository (owner/repo)"
+        required: true
+        type: string
+      pr_number:
+        description: "Pull request number"
+        required: true
+        type: string
+      head_sha:
+        description: "PR head SHA to stamp commit status on (optional; resolved if empty)"
+        required: false
+        type: string
+        default: ""
+  workflow_call:
+    inputs:
+      repository:
+        required: true
+        type: string
+      pr_number:
+        required: true
+        type: string
+      head_sha:
+        required: false
+        type: string
+        default: ""
+    secrets:
+      TOKEN:
+        required: true
+
+permissions:
+  contents: read
+
+env:
+  STATUS_CONTEXT: "Connectors Integration Test"
+
+jobs:
+  integration-test:
+    name: Integration Test
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+
+    steps:
+      - name: Checkout run-actions (self)
+        uses: actions/checkout@v4
+        with:
+          path: run-actions
+
+      - name: Authenticate gh CLI
+        run: |
+          echo -n "${{ secrets.TOKEN }}" | gh auth login --with-token
+          gh auth status
+        env:
+          GH_TOKEN: ${{ secrets.TOKEN }}
+
+      - name: Resolve PR head ref and SHA
+        id: pr
+        run: |
+          set -euo pipefail
+          REPO="${{ inputs.repository }}"
+          PR="${{ inputs.pr_number }}"
+          INPUT_SHA="${{ inputs.head_sha }}"
+
+          META=$(gh pr view "$PR" --repo "$REPO" --json headRefName,headRefOid,baseRefName,state,isCrossRepository,headRepository,headRepositoryOwner)
+          HEAD_REF=$(echo "$META" | jq -r '.headRefName')
+          HEAD_SHA=$(echo "$META" | jq -r '.headRefOid')
+          BASE_REF=$(echo "$META" | jq -r '.baseRefName')
+          STATE=$(echo "$META" | jq -r '.state')
+
+          if [ -n "$INPUT_SHA" ]; then
+            # Caller pinned a SHA. Prefer it: the PR may have been force-pushed
+            # between dispatch and the runner picking up the job.
+            HEAD_SHA="$INPUT_SHA"
+          fi
+
+          echo "head_ref=$HEAD_REF" >> "$GITHUB_OUTPUT"
+          echo "head_sha=$HEAD_SHA" >> "$GITHUB_OUTPUT"
+          echo "base_ref=$BASE_REF" >> "$GITHUB_OUTPUT"
+          echo "state=$STATE"       >> "$GITHUB_OUTPUT"
+
+          echo "Resolved PR $REPO#$PR — head=$HEAD_REF@$HEAD_SHA base=$BASE_REF state=$STATE"
+        env:
+          GH_TOKEN: ${{ secrets.TOKEN }}
+
+      - name: Set commit status (pending)
+        if: steps.pr.outputs.state == 'OPEN'
+        run: |
+          set -euo pipefail
+          WORKFLOW_URL="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          gh api "repos/${{ inputs.repository }}/statuses/${{ steps.pr.outputs.head_sha }}" \
+            --method POST \
+            -f state="pending" \
+            -f target_url="$WORKFLOW_URL" \
+            -f description="Integration test in progress" \
+            -f context="$STATUS_CONTEXT"
+        env:
+          GH_TOKEN: ${{ secrets.TOKEN }}
+
+      - name: Checkout target repo at PR head
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ inputs.repository }}
+          ref: ${{ steps.pr.outputs.head_sha }}
+          path: connectors
+          token: ${{ secrets.TOKEN }}
+          fetch-depth: 1
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: connectors/go.mod
+          cache-dependency-path: connectors/go.sum
+
+      - name: Set up ko
+        uses: ko-build/setup-ko@v0.8
+        with:
+          version: v0.17.1
+
+      - name: Set up kubectl
+        uses: azure/setup-kubectl@v4
+        with:
+          version: v1.33.3
+
+      - name: Override ko base image (public)
+        working-directory: connectors
+        run: |
+          # `.ko.yaml` references a private Alauda mirror for the base image.
+          # Point ko at the upstream public equivalent so the GHA runner can
+          # pull it.
+          cat > .ko.yaml <<'EOF'
+          defaultBaseImage: gcr.io/distroless/static-debian12:nonroot
+          EOF
+          cat .ko.yaml
+
+      - name: Create Kind cluster
+        uses: helm/kind-action@v1
+        with:
+          cluster_name: connectors-ci
+          node_image: kindest/node:v1.33.1
+          kubectl_version: v1.33.3
+          wait: 300s
+
+      - name: Show cluster info
+        run: kubectl cluster-info && kubectl get nodes -o wide
+
+      - name: Pre-load public stand-in images into Kind
+        working-directory: connectors
+        run: |
+          set -euo pipefail
+          # The BDD test data references nginx via a Go template that expands
+          # to `<default-registry>/3rdparty/nginx:1.23.2` when no override is
+          # provided. Pull the public Docker Hub image, retag it under the
+          # default path, and load it so pods with
+          # `imagePullPolicy: IfNotPresent` find it locally.
+          NGINX_PATH='152-231-registry.alauda.cn:60070/3rdparty/nginx:1.23.2'
+          docker pull nginx:1.23.2
+          docker tag nginx:1.23.2 "$NGINX_PATH"
+          kind load docker-image "$NGINX_PATH" --name connectors-ci
+
+      - name: Deploy connectors (kind-bootstrap)
+        working-directory: connectors
+        env:
+          KIND_IMAGE: kindest/node:v1.33.1
+          REPLACE_IMG: "n"
+          TAG_OWNER_SOURCE: ci
+          GOMAXPROCS: "4"
+        run: |
+          set -euo pipefail
+          # Reuse the kind cluster created by helm/kind-action by making the
+          # connectors Makefile point at its kubeconfig/name instead of
+          # creating a fresh cluster.
+          CLUSTER_NAME=connectors-ci
+          KIND_KUBECONFIG="$HOME/.kube/kind-$CLUSTER_NAME"
+          kind get kubeconfig --name "$CLUSTER_NAME" > "$KIND_KUBECONFIG"
+          chmod 600 "$KIND_KUBECONFIG"
+
+          export TAG="$CLUSTER_NAME"                 # matches kind cluster name
+          export KIND_KUBECONFIG
+          export KUBECONFIG="$KIND_KUBECONFIG"
+          export KO_DOCKER_REPO=kind.local
+          export KIND_CLUSTER_NAME="$CLUSTER_NAME"
+
+          # cert-manager with upstream quay.io images (REPLACE_IMG=n).
+          make certmanager
+
+          make dist
+          make deploy
+
+      - name: Show deployed resources (debug)
+        if: always()
+        run: |
+          kubectl -n cpaas-system get pods -o wide || true
+          kubectl -n cpaas-system get deploy,ds,svc,ingress || true
+          kubectl get crd | grep -E 'connectors|cert-manager' || true
+
+      - name: Run BDD suite (non-featureflags)
+        id: bdd-main
+        working-directory: connectors
+        env:
+          REPORT: allure
+          GODOG_ARGS: "--godog.format=allure --godog.concurrency=1"
+        run: |
+          set -euo pipefail
+          CLUSTER_NAME=connectors-ci
+          export KUBECONFIG="$HOME/.kube/kind-$CLUSTER_NAME"
+          export TAG="$CLUSTER_NAME"
+          export TAG_OWNER_SOURCE=ci
+
+          # ~@pending suppresses Layer-2 regression guards whose companion
+          # upstream fix is still in flight (see DEVOPS-43824).
+          TAGS="~@featureflags && ~@pending" make test
+
+      - name: Run BDD suite (featureflags)
+        id: bdd-featureflags
+        if: steps.bdd-main.outcome == 'success' || always()
+        working-directory: connectors
+        env:
+          REPORT: allure
+          GODOG_ARGS: "--godog.format=allure --godog.concurrency=1"
+        run: |
+          set -euo pipefail
+          CLUSTER_NAME=connectors-ci
+          export KUBECONFIG="$HOME/.kube/kind-$CLUSTER_NAME"
+          export TAG="$CLUSTER_NAME"
+          export TAG_OWNER_SOURCE=ci
+
+          TAGS="@featureflags && ~@pending" make enable-featureflags test
+
+      - name: Upload allure results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: allure-results-${{ steps.pr.outputs.head_sha }}
+          path: |
+            connectors/testing/allure-results/
+          if-no-files-found: ignore
+
+      - name: Collect cluster diagnostics on failure
+        if: failure()
+        run: |
+          set +e
+          mkdir -p /tmp/diag
+          kubectl cluster-info dump --all-namespaces --output-directory=/tmp/diag > /dev/null
+          kubectl -n cpaas-system describe pods > /tmp/diag/cpaas-pods-describe.txt
+          kubectl get events -A --sort-by=.lastTimestamp > /tmp/diag/events.txt
+
+      - name: Upload diagnostics artifact
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cluster-diagnostics-${{ steps.pr.outputs.head_sha }}
+          path: /tmp/diag/
+          if-no-files-found: ignore
+
+      - name: Update commit status (final)
+        if: always() && steps.pr.outputs.state == 'OPEN'
+        env:
+          GH_TOKEN: ${{ secrets.TOKEN }}
+        run: |
+          set -euo pipefail
+          WORKFLOW_URL="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+
+          MAIN="${{ steps.bdd-main.outcome }}"
+          FF="${{ steps.bdd-featureflags.outcome }}"
+          STATE="success"
+          DESC="Integration tests passed"
+
+          if [ "$MAIN" = "failure" ] || [ "$FF" = "failure" ]; then
+            STATE="failure"
+            DESC="Integration tests failed (main=$MAIN featureflags=$FF)"
+          elif [ "$MAIN" = "cancelled" ] || [ "$FF" = "cancelled" ]; then
+            STATE="error"
+            DESC="Integration tests cancelled"
+          elif [ "${{ job.status }}" = "failure" ] || [ "${{ job.status }}" = "cancelled" ]; then
+            # Setup step failed before tests ran.
+            STATE="error"
+            DESC="Integration test setup failed"
+          fi
+
+          gh api "repos/${{ inputs.repository }}/statuses/${{ steps.pr.outputs.head_sha }}" \
+            --method POST \
+            -f state="$STATE" \
+            -f target_url="$WORKFLOW_URL" \
+            -f description="$DESC" \
+            -f context="$STATUS_CONTEXT"
