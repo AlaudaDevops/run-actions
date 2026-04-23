@@ -309,7 +309,7 @@ jobs:
         working-directory: connectors/testing
         env:
           REPORT: allure
-          GODOG_ARGS: "--godog.format=allure --godog.concurrency=1"
+          GODOG_ARGS: "--godog.format=allure --godog.concurrency=2"
         run: |
           set -euo pipefail
 
