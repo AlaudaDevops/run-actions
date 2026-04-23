@@ -68,13 +68,6 @@ jobs:
         with:
           path: run-actions
 
-      - name: Authenticate gh CLI
-        run: |
-          echo -n "${{ secrets.TOKEN }}" | gh auth login --with-token
-          gh auth status
-        env:
-          GH_TOKEN: ${{ secrets.TOKEN }}
-
       - name: Resolve PR head ref and SHA
         id: pr
         run: |
@@ -180,6 +173,7 @@ jobs:
           kind load docker-image "$NGINX_PATH" --name connectors-ci
 
       - name: Deploy connectors (kind-bootstrap)
+        id: deploy
         working-directory: connectors
         env:
           KIND_IMAGE: kindest/node:v1.33.1
@@ -215,8 +209,9 @@ jobs:
           kubectl -n cpaas-system get deploy,ds,svc,ingress || true
           kubectl get crd | grep -E 'connectors|cert-manager' || true
 
-      - name: Run BDD suite (non-featureflags)
-        id: bdd-main
+      - name: Run BDD suite
+        id: bdd
+        if: steps.deploy.outcome == 'success'
         working-directory: connectors
         env:
           REPORT: allure
@@ -232,20 +227,8 @@ jobs:
           # upstream fix is still in flight (see DEVOPS-43824).
           TAGS="~@featureflags && ~@pending" make test
 
-      - name: Run BDD suite (featureflags)
-        id: bdd-featureflags
-        if: steps.bdd-main.outcome == 'success' || always()
-        working-directory: connectors
-        env:
-          REPORT: allure
-          GODOG_ARGS: "--godog.format=allure --godog.concurrency=1"
-        run: |
-          set -euo pipefail
-          CLUSTER_NAME=connectors-ci
-          export KUBECONFIG="$HOME/.kube/kind-$CLUSTER_NAME"
-          export TAG="$CLUSTER_NAME"
-          export TAG_OWNER_SOURCE=ci
-
+          # featureflags pass: apply the ff CRDs, then run the ff-tagged
+          # scenarios.
           TAGS="@featureflags && ~@pending" make enable-featureflags test
 
       - name: Upload allure results
@@ -282,21 +265,20 @@ jobs:
           set -euo pipefail
           WORKFLOW_URL="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
 
-          MAIN="${{ steps.bdd-main.outcome }}"
-          FF="${{ steps.bdd-featureflags.outcome }}"
+          DEPLOY="${{ steps.deploy.outcome }}"
+          BDD="${{ steps.bdd.outcome }}"
           STATE="success"
           DESC="Integration tests passed"
 
-          if [ "$MAIN" = "failure" ] || [ "$FF" = "failure" ]; then
+          if [ "$BDD" = "failure" ]; then
             STATE="failure"
-            DESC="Integration tests failed (main=$MAIN featureflags=$FF)"
-          elif [ "$MAIN" = "cancelled" ] || [ "$FF" = "cancelled" ]; then
+            DESC="BDD tests failed"
+          elif [ "$DEPLOY" != "success" ]; then
+            STATE="error"
+            DESC="Integration test setup failed (deploy=$DEPLOY)"
+          elif [ "$BDD" = "cancelled" ] || [ "$DEPLOY" = "cancelled" ]; then
             STATE="error"
             DESC="Integration tests cancelled"
-          elif [ "${{ job.status }}" = "failure" ] || [ "${{ job.status }}" = "cancelled" ]; then
-            # Setup step failed before tests ran.
-            STATE="error"
-            DESC="Integration test setup failed"
           fi
 
           gh api "repos/${{ inputs.repository }}/statuses/${{ steps.pr.outputs.head_sha }}" \
