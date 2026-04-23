@@ -277,14 +277,14 @@ jobs:
       - name: Run BDD suite
         id: bdd
         if: steps.deploy.outcome == 'success'
-        working-directory: connectors
+        # The BDD suite lives in testing/ with its own Makefile — `make test`
+        # at the repo root runs unit tests instead.
+        working-directory: connectors/testing
         env:
           REPORT: allure
           GODOG_ARGS: "--godog.format=allure --godog.concurrency=1"
         run: |
           set -euo pipefail
-          export TAG=connectors-ci
-          export TAG_OWNER_SOURCE=ci
 
           # ~@pending suppresses Layer-2 regression guards whose companion
           # upstream fix is still in flight (see DEVOPS-43824).
