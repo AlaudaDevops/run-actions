@@ -140,6 +140,19 @@ jobs:
             connectors/go.sum
             connectors/testing/go.sum
 
+      - name: Configure git token for go mod git fallback
+        # Some AlaudaDevops/* pseudo-versions pinned in go.mod aren't
+        # cached on proxy.golang.org, so Go falls back to `git ls-remote`
+        # direct. Anonymous git fails on GHA's ubuntu runners ("could not
+        # read Username ... terminal prompts disabled") — so rewrite
+        # https://github.com/ URLs to include the secrets.TOKEN so git
+        # authenticates and the fallback works.
+        env:
+          TOKEN: ${{ secrets.TOKEN }}
+        run: |
+          git config --global url."https://x-access-token:${TOKEN}@github.com/".insteadOf "https://github.com/"
+          echo "git config applied (token redacted)"
+
       - name: Set up ko
         uses: ko-build/setup-ko@v0.8
         with:
