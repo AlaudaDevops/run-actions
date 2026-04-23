@@ -69,6 +69,21 @@ on:
         required: false
         type: number
         default: 120
+
+      # --- command overrides. Empty = use built-in default. Set to a
+      # shell snippet to replace the corresponding step. Use this to
+      # validate a new Makefile target (e.g. `make ci-deploy`) in a
+      # connectors PR before promoting it into this workflow's default.
+      deploy_command:
+        description: "Override the deploy step. CWD is `connectors/`. Empty uses built-in kubectl apply + rollout wait."
+        required: false
+        type: string
+        default: ""
+      bdd_command:
+        description: "Override the BDD invocation. CWD is `connectors/testing/`. Empty uses built-in two-pass `TAGS=… make test` / `make enable-featureflags test`. `EXCLUDE` env var is pre-set to the computed tag exclusion suffix (starts with ` && `) — reference it as `$EXCLUDE` if you want the same flake/pending filtering."
+        required: false
+        type: string
+        default: ""
   workflow_call:
     inputs:
       repository:         { required: true,  type: string }
@@ -80,6 +95,8 @@ on:
       ko_base_image:      { required: false, type: string, default: "gcr.io/distroless/static-debian12:nonroot" }
       cert_manager_version: { required: false, type: string, default: "v1.4.0" }
       timeout_minutes:    { required: false, type: number, default: 120 }
+      deploy_command:     { required: false, type: string, default: "" }
+      bdd_command:        { required: false, type: string, default: "" }
     secrets:
       TOKEN:
         required: true
@@ -290,11 +307,22 @@ jobs:
       - name: Deploy connectors
         id: deploy
         working-directory: connectors
+        env:
+          DEPLOY_COMMAND: ${{ inputs.deploy_command }}
         run: |
           set -euo pipefail
-          # Inline `make deploy` so we don't re-trigger its `dist`
-          # dependency (another ~5 min of ko+kustomize for the same
-          # manifest).
+          if [ -n "$DEPLOY_COMMAND" ]; then
+            echo "::notice::Using caller-provided deploy_command override"
+            echo "--- deploy_command ---"
+            printf '%s\n' "$DEPLOY_COMMAND"
+            echo "----------------------"
+            bash -euo pipefail -c "$DEPLOY_COMMAND"
+            exit 0
+          fi
+
+          # Default: inline `make deploy` so we don't re-trigger its
+          # `dist` dependency (another ~5 min of ko+kustomize for the
+          # same manifest).
           kubectl get ns cpaas-system >/dev/null 2>&1 \
             || kubectl create ns cpaas-system
           if kubectl get crd issuers.cert-manager.io >/dev/null 2>&1; then
@@ -325,6 +353,7 @@ jobs:
           REPORT: allure
           GODOG_ARGS: "--godog.format=allure --godog.concurrency=${{ inputs.godog_concurrency }}"
           EXTRA_EXCLUDE: ${{ inputs.bdd_tags_extra_exclude }}
+          BDD_COMMAND: ${{ inputs.bdd_command }}
         run: |
           set -euo pipefail
           # Glue the suite's ~@pending default to the caller's extra
@@ -334,6 +363,16 @@ jobs:
             EXCLUDE=" && ${EXTRA_EXCLUDE}"
           else
             EXCLUDE=""
+          fi
+          export EXCLUDE   # visible to bdd_command overrides
+
+          if [ -n "$BDD_COMMAND" ]; then
+            echo "::notice::Using caller-provided bdd_command override"
+            echo "--- bdd_command (EXCLUDE=\"$EXCLUDE\") ---"
+            printf '%s\n' "$BDD_COMMAND"
+            echo "-------------------------------------------"
+            bash -euo pipefail -c "$BDD_COMMAND"
+            exit 0
           fi
 
           TAGS="~@featureflags && ~@pending${EXCLUDE}" make test
@@ -354,6 +393,8 @@ jobs:
           CERT_MANAGER_VERSION: ${{ inputs.cert_manager_version }}
           GODOG_CONCURRENCY: ${{ inputs.godog_concurrency }}
           BDD_TAGS_EXTRA_EXCLUDE: ${{ inputs.bdd_tags_extra_exclude }}
+          DEPLOY_COMMAND: ${{ inputs.deploy_command }}
+          BDD_COMMAND: ${{ inputs.bdd_command }}
         run: |
           set -euo pipefail
           SUMMARY="$GITHUB_STEP_SUMMARY"
@@ -383,7 +424,38 @@ jobs:
           | cert-manager version | \`${CERT_MANAGER_VERSION}\` |
           | Godog concurrency | \`${GODOG_CONCURRENCY}\` |
           | Extra tag exclusions | \`${BDD_TAGS_EXTRA_EXCLUDE:-(none)}\` |
+          | Deploy command | $( [ -n "$DEPLOY_COMMAND" ] && echo "⚙️ override" || echo "default" ) |
+          | BDD command | $( [ -n "$BDD_COMMAND" ] && echo "⚙️ override" || echo "default" ) |
           EOF
+
+          # If any command was overridden, include the override body in a
+          # collapsible block so the run log is self-documenting.
+          if [ -n "$DEPLOY_COMMAND" ] || [ -n "$BDD_COMMAND" ]; then
+            {
+              echo ""
+              echo "### Command overrides"
+              if [ -n "$DEPLOY_COMMAND" ]; then
+                echo ""
+                echo "<details><summary>deploy_command</summary>"
+                echo ""
+                echo '```bash'
+                printf '%s\n' "$DEPLOY_COMMAND"
+                echo '```'
+                echo ""
+                echo "</details>"
+              fi
+              if [ -n "$BDD_COMMAND" ]; then
+                echo ""
+                echo "<details><summary>bdd_command</summary>"
+                echo ""
+                echo '```bash'
+                printf '%s\n' "$BDD_COMMAND"
+                echo '```'
+                echo ""
+                echo "</details>"
+              fi
+            } >> "$SUMMARY"
+          fi
 
           # If the allure dir is absent or empty, we likely failed before
           # any BDD scenario ran — show that and skip result aggregation.
