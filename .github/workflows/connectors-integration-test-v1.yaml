@@ -339,6 +339,131 @@ jobs:
           TAGS="~@featureflags && ~@pending${EXCLUDE}" make test
           TAGS="@featureflags && ~@pending${EXCLUDE}"  make enable-featureflags test
 
+      - name: Write job summary
+        if: always()
+        env:
+          PR_REPO: ${{ inputs.repository }}
+          PR_NUMBER: ${{ inputs.pr_number }}
+          HEAD_SHA: ${{ steps.pr.outputs.head_sha }}
+          HEAD_REF: ${{ steps.pr.outputs.head_ref }}
+          BASE_REF: ${{ steps.pr.outputs.base_ref }}
+          DEPLOY_OUTCOME: ${{ steps.deploy.outcome }}
+          BDD_OUTCOME: ${{ steps.bdd.outcome }}
+          KIND_NODE_IMAGE: ${{ inputs.kind_node_image }}
+          KO_BASE_IMAGE: ${{ inputs.ko_base_image }}
+          CERT_MANAGER_VERSION: ${{ inputs.cert_manager_version }}
+          GODOG_CONCURRENCY: ${{ inputs.godog_concurrency }}
+          BDD_TAGS_EXTRA_EXCLUDE: ${{ inputs.bdd_tags_extra_exclude }}
+        run: |
+          set -euo pipefail
+          SUMMARY="$GITHUB_STEP_SUMMARY"
+          ALLURE_DIR=connectors/testing/allure-results
+
+          # Header + config block.
+          cat >> "$SUMMARY" <<EOF
+          # Connectors Integration Test
+
+          **PR:** [${PR_REPO}#${PR_NUMBER}](https://github.com/${PR_REPO}/pull/${PR_NUMBER}) — \`${HEAD_REF}\` → \`${BASE_REF}\`
+          **Head:** [\`${HEAD_SHA:0:8}\`](https://github.com/${PR_REPO}/commit/${HEAD_SHA})
+          **Workflow run:** [${GITHUB_RUN_ID}](${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID})
+
+          ## Phases
+
+          | Phase | Outcome |
+          |---|---|
+          | Deploy | $( [ "$DEPLOY_OUTCOME" = success ] && echo "✅ success" || echo "❌ $DEPLOY_OUTCOME" ) |
+          | BDD    | $( [ "$BDD_OUTCOME"    = success ] && echo "✅ success" || echo "❌ $BDD_OUTCOME" ) |
+
+          ## Configuration
+
+          | Input | Value |
+          |---|---|
+          | Kind node image | \`${KIND_NODE_IMAGE}\` |
+          | ko base image | \`${KO_BASE_IMAGE}\` |
+          | cert-manager version | \`${CERT_MANAGER_VERSION}\` |
+          | Godog concurrency | \`${GODOG_CONCURRENCY}\` |
+          | Extra tag exclusions | \`${BDD_TAGS_EXTRA_EXCLUDE:-(none)}\` |
+          EOF
+
+          # If the allure dir is absent or empty, we likely failed before
+          # any BDD scenario ran — show that and skip result aggregation.
+          if [ ! -d "$ALLURE_DIR" ] || [ -z "$(ls -A "$ALLURE_DIR" 2>/dev/null)" ]; then
+            {
+              echo ""
+              echo "## Results"
+              echo ""
+              echo "_No allure results — BDD suite did not produce output._"
+            } >> "$SUMMARY"
+            exit 0
+          fi
+
+          # Aggregate per-status counts + failed-scenario details.
+          STATS=$(jq -s '
+            map({
+              name, status,
+              file: (.description // ""),
+              msg: (.statusDetails.message // ""),
+              failed_step: ([.steps[]? | select(.status == "failed") | .name] | first // ""),
+              failed_step_msg: ([.steps[]? | select(.status == "failed") | .statusDetails.message // ""] | first // "")
+            })
+            | {
+              total: length,
+              passed:  (map(select(.status == "passed"))  | length),
+              failed:  (map(select(.status == "failed"))  | length),
+              broken:  (map(select(.status == "broken"))  | length),
+              skipped: (map(select(.status == "skipped")) | length),
+              unknown: (map(select(.status | IN("passed","failed","broken","skipped") | not)) | length),
+              failures: (map(select(.status == "failed" or .status == "broken")))
+            }
+          ' "$ALLURE_DIR"/*-result.json)
+
+          TOTAL=$(echo "$STATS"   | jq -r .total)
+          PASSED=$(echo "$STATS"  | jq -r .passed)
+          FAILED=$(echo "$STATS"  | jq -r .failed)
+          BROKEN=$(echo "$STATS"  | jq -r .broken)
+          SKIPPED=$(echo "$STATS" | jq -r .skipped)
+          UNKNOWN=$(echo "$STATS" | jq -r .unknown)
+
+          OVERALL="✅ all scenarios passed"
+          if [ "$FAILED" -gt 0 ] || [ "$BROKEN" -gt 0 ]; then
+            OVERALL="❌ $((FAILED + BROKEN)) scenario(s) failed"
+          fi
+
+          cat >> "$SUMMARY" <<EOF
+
+          ## Results
+
+          **${OVERALL}** · total ${TOTAL}
+
+          | ✅ passed | ❌ failed | 💥 broken | ⏭️ skipped | ❓ unknown |
+          |---|---|---|---|---|
+          | ${PASSED} | ${FAILED} | ${BROKEN} | ${SKIPPED} | ${UNKNOWN} |
+          EOF
+
+          # Failed scenarios detail.
+          if [ "$FAILED" -gt 0 ] || [ "$BROKEN" -gt 0 ]; then
+            {
+              echo ""
+              echo "## Failed scenarios"
+              echo ""
+              echo "$STATS" | jq -r '
+                .failures[]
+                | "<details><summary><strong>" + .name + "</strong> <code>" + .status + "</code></summary>\n\n"
+                  + "- **Feature:** `" + .file + "`\n"
+                  + (if .failed_step != "" then "- **Failed step:** `" + .failed_step + "`\n" else "" end)
+                  + "\n**Error**\n\n```\n"
+                  + (if .failed_step_msg != "" then .failed_step_msg else .msg end)
+                  + "\n```\n\n</details>\n"
+              '
+              echo ""
+              echo "Full allure-results uploaded as artifact \`allure-results-${HEAD_SHA}\`."
+            } >> "$SUMMARY"
+          fi
+
+          echo ""                                               >> "$SUMMARY"
+          echo "---"                                            >> "$SUMMARY"
+          echo "_GHA port of edge-devops-task's kind-integration-test/0.3 pipeline. Workflow: \`connectors-integration-test-v1.yaml\`._" >> "$SUMMARY"
+
       - name: Upload allure results
         if: always()
         uses: actions/upload-artifact@v4
