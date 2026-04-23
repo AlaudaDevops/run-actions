@@ -315,11 +315,17 @@ jobs:
 
           # ~@pending suppresses Layer-2 regression guards whose companion
           # upstream fix is still in flight (see DEVOPS-43824).
-          TAGS="~@featureflags && ~@pending" make test
+          # ~@csi-approval-deny-error-file suppresses a scenario that
+          # asserts byte-exact protojson output; google.golang.org/protobuf
+          # intentionally randomizes whitespace between tokens so any
+          # exact-string assertion on protojson.Marshal output is
+          # inherently flaky. See the failing run 24839184023.
+          EXTRA_EXCLUDE='~@csi-approval-deny-error-file'
+          TAGS="~@featureflags && ~@pending && ${EXTRA_EXCLUDE}" make test
 
           # featureflags pass: apply the ff CRDs, then run the ff-tagged
           # scenarios.
-          TAGS="@featureflags && ~@pending" make enable-featureflags test
+          TAGS="@featureflags && ~@pending && ${EXTRA_EXCLUDE}" make enable-featureflags test
 
       - name: Upload allure results
         if: always()
