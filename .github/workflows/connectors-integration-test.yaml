@@ -177,7 +177,6 @@ jobs:
         working-directory: connectors
         env:
           KIND_IMAGE: kindest/node:v1.33.1
-          REPLACE_IMG: "n"
           TAG_OWNER_SOURCE: ci
           GOMAXPROCS: "4"
         run: |
@@ -193,8 +192,13 @@ jobs:
           export KO_DOCKER_REPO=kind.local
           export KIND_CLUSTER_NAME="$CLUSTER_NAME"
 
-          # Install cert-manager with upstream quay.io images (REPLACE_IMG=n).
-          make certmanager
+          # Install cert-manager. Pass REPLACE_IMG=n on the make command line
+          # (not just as an env var) so it unambiguously overrides the
+          # `?= y` default and takes the upstream-quay.io branch of the
+          # conditional — the REPLACE_IMG=y branch would rewrite image refs
+          # to registry.alauda.cn:60070 which is unreachable from GHA.
+          echo "REPLACE_IMG (env, should be empty now) = '${REPLACE_IMG:-}'"
+          make certmanager REPLACE_IMG=n
 
           # Build install.yaml. ko resolves :image refs for cmd/* to
           # kind.local/... and loads them into the kind cluster automatically.
@@ -241,23 +245,26 @@ jobs:
       - name: Deploy connectors (kubectl apply + rollout wait)
         id: deploy
         working-directory: connectors
-        env:
-          KIND_IMAGE: kindest/node:v1.33.1
-          REPLACE_IMG: "n"
-          TAG_OWNER_SOURCE: ci
-          GOMAXPROCS: "4"
         run: |
           set -euo pipefail
           CLUSTER_NAME=connectors-ci
           export KUBECONFIG="$HOME/.kube/kind-$CLUSTER_NAME"
-          export TAG="$CLUSTER_NAME"
-          export KO_DOCKER_REPO=kind.local
-          export KIND_CLUSTER_NAME="$CLUSTER_NAME"
 
-          # `make deploy` depends on `dist`. The install.yaml is already on
-          # disk from the previous step, so ko won't rebuild — it'll just
-          # re-emit the same manifest and then `kubectl apply`+ rollout-wait.
-          make deploy
+          # Inline the `make deploy` recipe so we don't re-trigger its
+          # `dist` dependency (which would re-run ko+kustomize for another
+          # ~5 min without changing the manifest).
+          kubectl get ns cpaas-system >/dev/null 2>&1 \
+            || kubectl create ns cpaas-system
+          if kubectl get crd issuers.cert-manager.io >/dev/null 2>&1; then
+            kubectl wait --for=condition=Established \
+              crd/certificates.cert-manager.io crd/issuers.cert-manager.io \
+              --timeout=120s || true
+          fi
+          kubectl apply -f dist/install.yaml
+          kubectl -n connectors-system rollout status deploy/connectors-api             --timeout=10m
+          kubectl -n connectors-system rollout status deploy/connectors-controller-manager --timeout=10m
+          kubectl -n connectors-system rollout status deploy/connectors-proxy           --timeout=10m
+          kubectl -n connectors-system rollout status ds/connectors-csi                 --timeout=10m
 
       - name: Show deployed resources (debug)
         if: always()
