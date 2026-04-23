@@ -172,6 +172,21 @@ jobs:
           docker tag nginx:1.23.2 "$NGINX_PATH"
           kind load docker-image "$NGINX_PATH" --name connectors-ci
 
+      - name: Install cert-manager from upstream
+        run: |
+          set -euo pipefail
+          # Install cert-manager directly from the upstream manifest rather
+          # than going through `make certmanager`. The connectors Makefile's
+          # certmanager target has varied between branches: some versions
+          # always rewrite image refs to registry.alauda.cn:60070 (a private
+          # Alauda registry that's unreachable from GHA), others gate the
+          # rewrite on REPLACE_IMG. Going directly to the upstream URL
+          # bypasses the inconsistency entirely.
+          kubectl apply -f https://github.com/jetstack/cert-manager/releases/download/v1.4.0/cert-manager.yaml
+          kubectl -n cert-manager rollout status deploy/cert-manager            --timeout=5m
+          kubectl -n cert-manager rollout status deploy/cert-manager-webhook    --timeout=5m
+          kubectl -n cert-manager rollout status deploy/cert-manager-cainjector --timeout=5m
+
       - name: Build install manifest (make dist)
         id: build-manifest
         working-directory: connectors
@@ -182,23 +197,9 @@ jobs:
         run: |
           set -euo pipefail
           CLUSTER_NAME=connectors-ci
-          KIND_KUBECONFIG="$HOME/.kube/kind-$CLUSTER_NAME"
-          kind get kubeconfig --name "$CLUSTER_NAME" > "$KIND_KUBECONFIG"
-          chmod 600 "$KIND_KUBECONFIG"
-
           export TAG="$CLUSTER_NAME"
-          export KIND_KUBECONFIG
-          export KUBECONFIG="$KIND_KUBECONFIG"
           export KO_DOCKER_REPO=kind.local
           export KIND_CLUSTER_NAME="$CLUSTER_NAME"
-
-          # Install cert-manager. Pass REPLACE_IMG=n on the make command line
-          # (not just as an env var) so it unambiguously overrides the
-          # `?= y` default and takes the upstream-quay.io branch of the
-          # conditional — the REPLACE_IMG=y branch would rewrite image refs
-          # to registry.alauda.cn:60070 which is unreachable from GHA.
-          echo "REPLACE_IMG (env, should be empty now) = '${REPLACE_IMG:-}'"
-          make certmanager REPLACE_IMG=n
 
           # Build install.yaml. ko resolves :image refs for cmd/* to
           # kind.local/... and loads them into the kind cluster automatically.
@@ -226,7 +227,7 @@ jobs:
           for ref in $PRIVATE; do
             echo "=== resolving public stand-in for $ref ==="
             case "$ref" in
-              *registry.alauda.cn*3rdparty/k8scsi/*)
+              *alauda.cn*3rdparty/k8scsi/*)
                 name=$(echo "$ref" | sed -E 's|.*/3rdparty/k8scsi/([^:]+):.*|\1|')
                 # Strip Alauda's `-<sha>` rebuild suffix, keep the upstream tag.
                 tag=$(echo "$ref" | sed -E 's|.*:([^:]+)$|\1|' | sed -E 's/-[a-f0-9]+$//')
