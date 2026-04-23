@@ -248,8 +248,8 @@ jobs:
         working-directory: connectors
         run: |
           set -euo pipefail
-          CLUSTER_NAME=connectors-ci
-          export KUBECONFIG="$HOME/.kube/kind-$CLUSTER_NAME"
+          # helm/kind-action@v1 already wrote the cluster kubeconfig to the
+          # runner's default location; don't override KUBECONFIG.
 
           # Inline the `make deploy` recipe so we don't re-trigger its
           # `dist` dependency (which would re-run ko+kustomize for another
@@ -283,9 +283,7 @@ jobs:
           GODOG_ARGS: "--godog.format=allure --godog.concurrency=1"
         run: |
           set -euo pipefail
-          CLUSTER_NAME=connectors-ci
-          export KUBECONFIG="$HOME/.kube/kind-$CLUSTER_NAME"
-          export TAG="$CLUSTER_NAME"
+          export TAG=connectors-ci
           export TAG_OWNER_SOURCE=ci
 
           # ~@pending suppresses Layer-2 regression guards whose companion
