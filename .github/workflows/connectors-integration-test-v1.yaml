@@ -1,26 +1,29 @@
-name: Connectors Integration Test
+name: Connectors Integration Test v1
 
-# This workflow runs the BDD integration suite of the AlaudaDevops/connectors
-# repository against a GitHub-hosted Kind cluster, on a public-images-only
-# runtime. It is the GitHub Actions port of the Tekton
-# `kind-integration-test/0.3` pipeline maintained in the edge-devops-task repo.
+# Runs the BDD integration suite of AlaudaDevops/connectors against a
+# GitHub-hosted Kind cluster, using public images only. GitHub Actions
+# port of the edge-devops-task Tekton `kind-integration-test/0.3` pipeline.
 #
-# Versioning: callers should pin to a git tag such as
-# `connectors-integration-test-v1`. Breaking changes get a new tag and the
-# caller bumps its `--ref=` flag.
+# Versioning is by filename: this is v1. Breaking changes go in a new
+# `connectors-integration-test-v2.yaml`; v1 is kept for old release
+# branches until an explicit deprecation window closes. Bug fixes within
+# v1 edit this file in place and every caller picks them up.
 #
-# The caller (a workflow in the connectors repo) invokes this via
-#   gh workflow run connectors-integration-test.yaml
-#     --repo AlaudaDevops/run-actions
-#     --ref  connectors-integration-test-v1
-#     --field repository=AlaudaDevops/connectors
-#     --field pr_number=123
-#     --field head_sha=<sha>
-# with `GH_TOKEN: ${{ secrets.RUN_ACTIONS_TOKEN }}` in the caller env.
+# Caller (connectors repo, on pull_request):
+#
+#   - name: Trigger integration test
+#     env: { GH_TOKEN: ${{ secrets.RUN_ACTIONS_TOKEN }} }
+#     run: |
+#       gh workflow run connectors-integration-test-v1.yaml \
+#         --repo AlaudaDevops/run-actions \
+#         --field repository="${{ github.repository }}" \
+#         --field pr_number="${{ github.event.pull_request.number }}" \
+#         --field head_sha="${{ github.event.pull_request.head.sha }}"
 
 on:
   workflow_dispatch:
     inputs:
+      # --- required ---
       repository:
         description: "Target repository (owner/repo)"
         required: true
@@ -30,22 +33,53 @@ on:
         required: true
         type: string
       head_sha:
-        description: "PR head SHA to stamp commit status on (optional; resolved if empty)"
+        description: "PR head SHA to stamp commit status on (optional; resolved via gh pr view if empty)"
         required: false
         type: string
         default: ""
+
+      # --- tunables with sensible defaults, overridable by callers for validation ---
+      bdd_tags_extra_exclude:
+        description: "Godog tag expression appended to the default `~@pending` exclusion. Typically `~@some-flake && ~@another`. Set to empty string to run every scenario."
+        required: false
+        type: string
+        default: "~@csi-approval-deny-error-file && ~@accesspolicy-controller-filter-project"
+      godog_concurrency:
+        description: "Godog scenario concurrency"
+        required: false
+        type: string
+        default: "1"
+      kind_node_image:
+        description: "Kind node image. Override to test other k8s versions."
+        required: false
+        type: string
+        default: "kindest/node:v1.33.1"
+      ko_base_image:
+        description: "Public base image for ko-built connector binaries. Rewrites .ko.yaml at runtime."
+        required: false
+        type: string
+        default: "gcr.io/distroless/static-debian12:nonroot"
+      cert_manager_version:
+        description: "Upstream cert-manager tag, e.g. v1.4.0. Must match what the connectors repo expects."
+        required: false
+        type: string
+        default: "v1.4.0"
+      timeout_minutes:
+        description: "Per-job timeout. Default 120 min is plenty for the full BDD suite; bump for extra-large suites."
+        required: false
+        type: number
+        default: 120
   workflow_call:
     inputs:
-      repository:
-        required: true
-        type: string
-      pr_number:
-        required: true
-        type: string
-      head_sha:
-        required: false
-        type: string
-        default: ""
+      repository:         { required: true,  type: string }
+      pr_number:          { required: true,  type: string }
+      head_sha:           { required: false, type: string, default: "" }
+      bdd_tags_extra_exclude: { required: false, type: string, default: "~@csi-approval-deny-error-file && ~@accesspolicy-controller-filter-project" }
+      godog_concurrency:  { required: false, type: string, default: "1" }
+      kind_node_image:    { required: false, type: string, default: "kindest/node:v1.33.1" }
+      ko_base_image:      { required: false, type: string, default: "gcr.io/distroless/static-debian12:nonroot" }
+      cert_manager_version: { required: false, type: string, default: "v1.4.0" }
+      timeout_minutes:    { required: false, type: number, default: 120 }
     secrets:
       TOKEN:
         required: true
@@ -55,41 +89,41 @@ permissions:
 
 env:
   STATUS_CONTEXT: "Connectors Integration Test"
+  CLUSTER_NAME:   "connectors-ci"
 
 jobs:
   integration-test:
     name: Integration Test
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: ${{ fromJSON(inputs.timeout_minutes) }}
 
     steps:
       - name: Checkout run-actions (self)
         uses: actions/checkout@v4
         with:
           path: run-actions
-          # Don't persist an extraheader credential globally — it leaks
-          # into `go mod`'s git fallback for unrelated github.com repos
-          # and triggers "could not read Username" on public modules
-          # when the persisted token's scope doesn't match.
+          # Avoid leaking a credential into git's global config — breaks
+          # `go mod`'s git fallback on unrelated public github.com repos.
           persist-credentials: false
 
       - name: Resolve PR head ref and SHA
         id: pr
+        env:
+          GH_TOKEN: ${{ secrets.TOKEN }}
         run: |
           set -euo pipefail
           REPO="${{ inputs.repository }}"
           PR="${{ inputs.pr_number }}"
           INPUT_SHA="${{ inputs.head_sha }}"
 
-          META=$(gh pr view "$PR" --repo "$REPO" --json headRefName,headRefOid,baseRefName,state,isCrossRepository,headRepository,headRepositoryOwner)
+          META=$(gh pr view "$PR" --repo "$REPO" --json headRefName,headRefOid,baseRefName,state)
           HEAD_REF=$(echo "$META" | jq -r '.headRefName')
           HEAD_SHA=$(echo "$META" | jq -r '.headRefOid')
           BASE_REF=$(echo "$META" | jq -r '.baseRefName')
           STATE=$(echo "$META" | jq -r '.state')
 
+          # Caller-pinned SHA wins over live lookup (handles force-push).
           if [ -n "$INPUT_SHA" ]; then
-            # Caller pinned a SHA. Prefer it: the PR may have been force-pushed
-            # between dispatch and the runner picking up the job.
             HEAD_SHA="$INPUT_SHA"
           fi
 
@@ -99,11 +133,11 @@ jobs:
           echo "state=$STATE"       >> "$GITHUB_OUTPUT"
 
           echo "Resolved PR $REPO#$PR — head=$HEAD_REF@$HEAD_SHA base=$BASE_REF state=$STATE"
-        env:
-          GH_TOKEN: ${{ secrets.TOKEN }}
 
       - name: Set commit status (pending)
         if: steps.pr.outputs.state == 'OPEN'
+        env:
+          GH_TOKEN: ${{ secrets.TOKEN }}
         run: |
           set -euo pipefail
           WORKFLOW_URL="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
@@ -113,8 +147,6 @@ jobs:
             -f target_url="$WORKFLOW_URL" \
             -f description="Integration test in progress" \
             -f context="$STATUS_CONTEXT"
-        env:
-          GH_TOKEN: ${{ secrets.TOKEN }}
 
       - name: Checkout target repo at PR head
         uses: actions/checkout@v4
@@ -124,34 +156,28 @@ jobs:
           path: connectors
           token: ${{ secrets.TOKEN }}
           fetch-depth: 1
-          # Don't keep the credential in git config — it makes `go mod`'s
-          # git fallback prompt for a username on unrelated public
-          # modules.
           persist-credentials: false
 
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
           go-version-file: connectors/go.mod
-          # Both go.sum files — connectors/ is its own module but the BDD
-          # suite under testing/ has a separate go.mod with different
-          # dependency pins (including the AlaudaDevops/bdd pseudo-version).
+          # testing/ is its own module with a different AlaudaDevops/bdd
+          # pseudo-version pin.
           cache-dependency-path: |
             connectors/go.sum
             connectors/testing/go.sum
 
       - name: Configure git token for go mod git fallback
-        # Some AlaudaDevops/* pseudo-versions pinned in go.mod aren't
-        # cached on proxy.golang.org, so Go falls back to `git ls-remote`
-        # direct. Anonymous git fails on GHA's ubuntu runners ("could not
-        # read Username ... terminal prompts disabled") — so rewrite
-        # https://github.com/ URLs to include the secrets.TOKEN so git
-        # authenticates and the fallback works.
+        # AlaudaDevops/* pseudo-versions pinned in go.mod aren't always
+        # cached on proxy.golang.org, so go-mod falls back to git
+        # ls-remote direct. Anonymous git fails on GHA's ubuntu runners
+        # ("could not read Username ... terminal prompts disabled") so
+        # rewrite https://github.com/ URLs to carry an auth token.
         env:
           TOKEN: ${{ secrets.TOKEN }}
         run: |
           git config --global url."https://x-access-token:${TOKEN}@github.com/".insteadOf "https://github.com/"
-          echo "git config applied (token redacted)"
 
       - name: Set up ko
         uses: ko-build/setup-ko@v0.8
@@ -165,51 +191,49 @@ jobs:
 
       - name: Override ko base image (public)
         working-directory: connectors
+        env:
+          KO_BASE_IMAGE: ${{ inputs.ko_base_image }}
         run: |
-          # `.ko.yaml` references a private Alauda mirror for the base image.
-          # Point ko at the upstream public equivalent so the GHA runner can
-          # pull it.
-          cat > .ko.yaml <<'EOF'
-          defaultBaseImage: gcr.io/distroless/static-debian12:nonroot
-          EOF
+          # The default .ko.yaml references a private Alauda mirror. Swap
+          # in a public base image so the GHA runner can pull it.
+          printf 'defaultBaseImage: %s\n' "$KO_BASE_IMAGE" > .ko.yaml
           cat .ko.yaml
 
       - name: Create Kind cluster
         uses: helm/kind-action@v1
         with:
-          cluster_name: connectors-ci
-          node_image: kindest/node:v1.33.1
+          cluster_name: ${{ env.CLUSTER_NAME }}
+          node_image: ${{ inputs.kind_node_image }}
           kubectl_version: v1.33.3
           wait: 300s
 
       - name: Show cluster info
         run: kubectl cluster-info && kubectl get nodes -o wide
 
-      - name: Pre-load public stand-in images into Kind
+      - name: Pre-load public nginx as the BDD testdata expected path
         working-directory: connectors
         run: |
           set -euo pipefail
-          # The BDD test data references nginx via a Go template that expands
-          # to `<default-registry>/3rdparty/nginx:1.23.2` when no override is
-          # provided. Pull the public Docker Hub image, retag it under the
-          # default path, and load it so pods with
-          # `imagePullPolicy: IfNotPresent` find it locally.
+          # The BDD testdata references nginx via a Go template that
+          # expands to `<default-registry>/3rdparty/nginx:1.23.2` when
+          # no override is provided. Pull the public Docker Hub image,
+          # retag under the default path, and load into the kind node so
+          # pods with `imagePullPolicy: IfNotPresent` find it locally.
           NGINX_PATH='152-231-registry.alauda.cn:60070/3rdparty/nginx:1.23.2'
           docker pull nginx:1.23.2
           docker tag nginx:1.23.2 "$NGINX_PATH"
-          kind load docker-image "$NGINX_PATH" --name connectors-ci
+          kind load docker-image "$NGINX_PATH" --name "$CLUSTER_NAME"
 
       - name: Install cert-manager from upstream
+        env:
+          CERT_MANAGER_VERSION: ${{ inputs.cert_manager_version }}
         run: |
           set -euo pipefail
-          # Install cert-manager directly from the upstream manifest rather
-          # than going through `make certmanager`. The connectors Makefile's
-          # certmanager target has varied between branches: some versions
-          # always rewrite image refs to registry.alauda.cn:60070 (a private
-          # Alauda registry that's unreachable from GHA), others gate the
-          # rewrite on REPLACE_IMG. Going directly to the upstream URL
-          # bypasses the inconsistency entirely.
-          kubectl apply -f https://github.com/jetstack/cert-manager/releases/download/v1.4.0/cert-manager.yaml
+          # Install cert-manager directly rather than via `make certmanager`:
+          # the Makefile's target varies across branches and some versions
+          # unconditionally rewrite image refs to private Alauda registries.
+          URL="https://github.com/jetstack/cert-manager/releases/download/${CERT_MANAGER_VERSION}/cert-manager.yaml"
+          kubectl apply -f "$URL"
           kubectl -n cert-manager rollout status deploy/cert-manager            --timeout=5m
           kubectl -n cert-manager rollout status deploy/cert-manager-webhook    --timeout=5m
           kubectl -n cert-manager rollout status deploy/cert-manager-cainjector --timeout=5m
@@ -218,34 +242,28 @@ jobs:
         id: build-manifest
         working-directory: connectors
         env:
-          KIND_IMAGE: kindest/node:v1.33.1
           TAG_OWNER_SOURCE: ci
           GOMAXPROCS: "4"
         run: |
           set -euo pipefail
-          CLUSTER_NAME=connectors-ci
           export TAG="$CLUSTER_NAME"
           export KO_DOCKER_REPO=kind.local
           export KIND_CLUSTER_NAME="$CLUSTER_NAME"
-
-          # Build install.yaml. ko resolves :image refs for cmd/* to
-          # kind.local/... and loads them into the kind cluster automatically.
+          # ko writes cmd/* images to kind.local/... and loads them into
+          # the kind node automatically.
           make dist
-
           echo "--- dist/install.yaml images ---"
           grep -E '^\s*image:' dist/install.yaml | awk '{print $NF}' | sort -u
 
-      - name: Pre-load 3rd-party sidecar images into Kind
+      - name: Pre-load 3rd-party sidecar images
         working-directory: connectors
         run: |
           set -euo pipefail
-          # Any image in the generated install.yaml that points at a private
-          # Alauda registry (not kind.local/ and not ko://) needs a public
-          # stand-in loaded into the kind node, otherwise the rollout wait in
-          # `make deploy` will time out.
-          #
+          # Any dist/install.yaml image under a private Alauda registry
+          # needs a public stand-in loaded into kind, or rollout-wait
+          # will hang.
           # Current mapping (k8s CSI sidecars on Alauda's 3rdparty mirror):
-          #   registry.alauda.cn:60070/3rdparty/k8scsi/<name>:<upstream-tag>-<sha>
+          #   */3rdparty/k8scsi/<name>:<upstream-tag>-<sha>
           #     -> registry.k8s.io/sig-storage/<name>:<upstream-tag>
           PRIVATE=$(grep -E '^\s*image:' dist/install.yaml \
             | awk '{print $NF}' \
@@ -256,13 +274,12 @@ jobs:
             case "$ref" in
               *alauda.cn*3rdparty/k8scsi/*)
                 name=$(echo "$ref" | sed -E 's|.*/3rdparty/k8scsi/([^:]+):.*|\1|')
-                # Strip Alauda's `-<sha>` rebuild suffix, keep the upstream tag.
-                tag=$(echo "$ref" | sed -E 's|.*:([^:]+)$|\1|' | sed -E 's/-[a-f0-9]+$//')
+                tag=$(echo "$ref"  | sed -E 's|.*:([^:]+)$|\1|' | sed -E 's/-[a-f0-9]+$//')
                 public="registry.k8s.io/sig-storage/${name}:${tag}"
                 echo "pulling $public -> retag as $ref"
                 docker pull "$public"
                 docker tag  "$public" "$ref"
-                kind load docker-image "$ref" --name connectors-ci
+                kind load docker-image "$ref" --name "$CLUSTER_NAME"
                 ;;
               *)
                 echo "WARNING: no public mapping for $ref — rollout may fail"
@@ -270,17 +287,14 @@ jobs:
             esac
           done
 
-      - name: Deploy connectors (kubectl apply + rollout wait)
+      - name: Deploy connectors
         id: deploy
         working-directory: connectors
         run: |
           set -euo pipefail
-          # helm/kind-action@v1 already wrote the cluster kubeconfig to the
-          # runner's default location; don't override KUBECONFIG.
-
-          # Inline the `make deploy` recipe so we don't re-trigger its
-          # `dist` dependency (which would re-run ko+kustomize for another
-          # ~5 min without changing the manifest).
+          # Inline `make deploy` so we don't re-trigger its `dist`
+          # dependency (another ~5 min of ko+kustomize for the same
+          # manifest).
           kubectl get ns cpaas-system >/dev/null 2>&1 \
             || kubectl create ns cpaas-system
           if kubectl get crd issuers.cert-manager.io >/dev/null 2>&1; then
@@ -304,31 +318,26 @@ jobs:
       - name: Run BDD suite
         id: bdd
         if: steps.deploy.outcome == 'success'
-        # The BDD suite lives in testing/ with its own Makefile — `make test`
-        # at the repo root runs unit tests instead.
+        # BDD suite lives in testing/ with its own Makefile — root `make test`
+        # runs unit tests.
         working-directory: connectors/testing
         env:
           REPORT: allure
-          GODOG_ARGS: "--godog.format=allure --godog.concurrency=2"
+          GODOG_ARGS: "--godog.format=allure --godog.concurrency=${{ inputs.godog_concurrency }}"
+          EXTRA_EXCLUDE: ${{ inputs.bdd_tags_extra_exclude }}
         run: |
           set -euo pipefail
+          # Glue the suite's ~@pending default to the caller's extra
+          # exclusions. Empty string is a valid value — then we only
+          # exclude ~@pending.
+          if [ -n "$EXTRA_EXCLUDE" ]; then
+            EXCLUDE=" && ${EXTRA_EXCLUDE}"
+          else
+            EXCLUDE=""
+          fi
 
-          # Tag exclusions for GHA runs, stacked with the suite's own
-          # ~@pending default:
-          #   ~@csi-approval-deny-error-file — asserts byte-exact
-          #     protojson output which google.golang.org/protobuf
-          #     intentionally randomizes, making the assertion flaky
-          #     (observed in run 24839184023).
-          #   ~@accesspolicy-controller-filter-project — controller
-          #     reconciliation assertion with a 60s per-field timeout;
-          #     GHA kind is slower than the internal cluster and hits
-          #     the deadline (observed in run 24841257170).
-          EXTRA_EXCLUDE='~@csi-approval-deny-error-file && ~@accesspolicy-controller-filter-project'
-          TAGS="~@featureflags && ~@pending && ${EXTRA_EXCLUDE}" make test
-
-          # featureflags pass: apply the ff CRDs, then run the ff-tagged
-          # scenarios.
-          TAGS="@featureflags && ~@pending && ${EXTRA_EXCLUDE}" make enable-featureflags test
+          TAGS="~@featureflags && ~@pending${EXCLUDE}" make test
+          TAGS="@featureflags && ~@pending${EXCLUDE}"  make enable-featureflags test
 
       - name: Upload allure results
         if: always()
@@ -345,8 +354,9 @@ jobs:
           set +e
           mkdir -p /tmp/diag
           kubectl cluster-info dump --all-namespaces --output-directory=/tmp/diag > /dev/null
-          kubectl -n cpaas-system describe pods > /tmp/diag/cpaas-pods-describe.txt
-          kubectl get events -A --sort-by=.lastTimestamp > /tmp/diag/events.txt
+          kubectl -n cpaas-system         describe pods   > /tmp/diag/cpaas-pods-describe.txt
+          kubectl -n connectors-system    describe pods   > /tmp/diag/connectors-pods-describe.txt
+          kubectl get events -A --sort-by=.lastTimestamp  > /tmp/diag/events.txt
 
       - name: Upload diagnostics artifact
         if: failure()
