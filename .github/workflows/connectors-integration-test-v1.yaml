@@ -142,6 +142,171 @@ env:
   CLUSTER_NAME:   "connectors-ci"
 
 jobs:
+  verify-codegen:
+    name: Verify Codegen
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Resolve target ref and SHA
+        id: pr
+        env:
+          GH_TOKEN: ${{ secrets.TOKEN }}
+        run: |
+          set -euo pipefail
+          REPO="${{ inputs.repository }}"
+          PR="${{ inputs.pr_number }}"
+          BRANCH="${{ inputs.branch }}"
+          INPUT_SHA="${{ inputs.head_sha }}"
+
+          if [ -n "$PR" ] && [ -n "$BRANCH" ]; then
+            echo "::error::pass exactly one of pr_number / branch, not both"
+            exit 1
+          fi
+          if [ -z "$PR" ] && [ -z "$BRANCH" ]; then
+            echo "::error::one of pr_number / branch must be set"
+            exit 1
+          fi
+
+          if [ -n "$PR" ]; then
+            MODE="pr"
+            META=$(gh pr view "$PR" --repo "$REPO" --json headRefOid,state)
+            HEAD_SHA=$(echo "$META" | jq -r '.headRefOid')
+            STATE=$(echo "$META" | jq -r '.state')
+            if [ -n "$INPUT_SHA" ]; then HEAD_SHA="$INPUT_SHA"; fi
+          else
+            MODE="branch"
+            STATE="BRANCH"
+            if [ -n "$INPUT_SHA" ]; then
+              HEAD_SHA="$INPUT_SHA"
+            else
+              HEAD_SHA=$(gh api "repos/$REPO/branches/$BRANCH" --jq '.commit.sha')
+              echo "::warning::head_sha not pinned by caller — resolved branch tip at job start ($HEAD_SHA)."
+            fi
+          fi
+          echo "mode=$MODE"         >> "$GITHUB_OUTPUT"
+          echo "head_sha=$HEAD_SHA" >> "$GITHUB_OUTPUT"
+          echo "state=$STATE"       >> "$GITHUB_OUTPUT"
+
+      - name: Set commit status (pending)
+        if: steps.pr.outputs.mode == 'branch' || steps.pr.outputs.state == 'OPEN'
+        env:
+          GH_TOKEN: ${{ secrets.TOKEN }}
+        run: |
+          WORKFLOW_URL="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          gh api "repos/${{ inputs.repository }}/statuses/${{ steps.pr.outputs.head_sha }}" \
+            --method POST \
+            -f state="pending" \
+            -f target_url="$WORKFLOW_URL" \
+            -f description="Verifying generated files" \
+            -f context="Connectors Verify Codegen"
+
+      - name: Checkout target repo
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ inputs.repository }}
+          ref: ${{ steps.pr.outputs.head_sha }}
+          path: connectors
+          token: ${{ secrets.TOKEN }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: connectors/go.mod
+          cache-dependency-path: connectors/go.sum
+
+      - name: Configure git token for go mod git fallback
+        env:
+          TOKEN: ${{ secrets.TOKEN }}
+        run: |
+          git config --global url."https://x-access-token:${TOKEN}@github.com/".insteadOf "https://github.com/"
+
+      - name: Verify manifests and generated code
+        id: verify
+        working-directory: connectors
+        run: |
+          set -euo pipefail
+          make manifests generate
+          git diff --stat -- config/ pkg/apis/ > /tmp/codegen-stat.txt
+          git diff -- config/ pkg/apis/ > /tmp/codegen-diff.txt
+          if [ -s /tmp/codegen-diff.txt ]; then
+            echo "::error::Generated files are out of date. Run 'make manifests generate' locally and commit the results."
+            cat /tmp/codegen-stat.txt
+            exit 1
+          fi
+
+      - name: Write job summary
+        if: always()
+        run: |
+          set -euo pipefail
+          SUMMARY="$GITHUB_STEP_SUMMARY"
+          VERIFY="${{ steps.verify.outcome }}"
+
+          if [ "$VERIFY" = "success" ]; then
+            echo "## ✅ Verify Codegen — passed" >> "$SUMMARY"
+            echo "" >> "$SUMMARY"
+            echo "Generated files (CRDs, RBAC, DeepCopy) are up-to-date." >> "$SUMMARY"
+          elif [ "$VERIFY" = "failure" ] && [ -s /tmp/codegen-diff.txt ]; then
+            {
+              echo "## ❌ Verify Codegen — failed"
+              echo ""
+              echo "Generated files are **out of date**. Run the following locally and commit the results:"
+              echo ""
+              echo '```bash'
+              echo "make manifests generate"
+              echo '```'
+              echo ""
+              echo "### Changed files"
+              echo ""
+              echo '```'
+              cat /tmp/codegen-stat.txt
+              echo '```'
+              echo ""
+              echo "### Diff"
+              echo ""
+              echo '```diff'
+              head -200 /tmp/codegen-diff.txt
+              if [ "$(wc -l < /tmp/codegen-diff.txt)" -gt 200 ]; then
+                echo "... (truncated, see full log for details)"
+              fi
+              echo '```'
+            } >> "$SUMMARY"
+          else
+            {
+              echo "## ❌ Verify Codegen — error"
+              echo ""
+              echo "The \`make manifests generate\` command failed before the diff check."
+              echo "See the [workflow log](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}) for details."
+            } >> "$SUMMARY"
+          fi
+
+      - name: Update commit status (final)
+        if: always() && (steps.pr.outputs.mode == 'branch' || steps.pr.outputs.state == 'OPEN')
+        env:
+          GH_TOKEN: ${{ secrets.TOKEN }}
+        run: |
+          set -euo pipefail
+          WORKFLOW_URL="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          VERIFY="${{ steps.verify.outcome }}"
+          if [ "$VERIFY" = "success" ]; then
+            STATE="success"
+            DESC="Generated files are up-to-date"
+          elif [ "$VERIFY" = "failure" ]; then
+            STATE="failure"
+            DESC="Generated files are out of date"
+          else
+            STATE="error"
+            DESC="Verify codegen job failed unexpectedly"
+          fi
+          gh api "repos/${{ inputs.repository }}/statuses/${{ steps.pr.outputs.head_sha }}" \
+            --method POST \
+            -f state="$STATE" \
+            -f target_url="$WORKFLOW_URL" \
+            -f description="$DESC" \
+            -f context="Connectors Verify Codegen"
+
   integration-test:
     name: Integration Test
     runs-on: ubuntu-latest
