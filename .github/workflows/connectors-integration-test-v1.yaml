@@ -142,6 +142,101 @@ env:
   CLUSTER_NAME:   "connectors-ci"
 
 jobs:
+  verify-codegen:
+    name: Verify Codegen
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Resolve target ref and SHA
+        id: pr
+        env:
+          GH_TOKEN: ${{ secrets.TOKEN }}
+        run: |
+          set -euo pipefail
+          REPO="${{ inputs.repository }}"
+          PR="${{ inputs.pr_number }}"
+          BRANCH="${{ inputs.branch }}"
+          INPUT_SHA="${{ inputs.head_sha }}"
+
+          if [ -n "$PR" ]; then
+            META=$(gh pr view "$PR" --repo "$REPO" --json headRefOid)
+            HEAD_SHA=$(echo "$META" | jq -r '.headRefOid')
+            if [ -n "$INPUT_SHA" ]; then HEAD_SHA="$INPUT_SHA"; fi
+          else
+            if [ -n "$INPUT_SHA" ]; then
+              HEAD_SHA="$INPUT_SHA"
+            else
+              HEAD_SHA=$(gh api "repos/$REPO/branches/$BRANCH" --jq '.commit.sha')
+            fi
+          fi
+          echo "head_sha=$HEAD_SHA" >> "$GITHUB_OUTPUT"
+
+      - name: Set commit status (pending)
+        env:
+          GH_TOKEN: ${{ secrets.TOKEN }}
+        run: |
+          WORKFLOW_URL="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          gh api "repos/${{ inputs.repository }}/statuses/${{ steps.pr.outputs.head_sha }}" \
+            --method POST \
+            -f state="pending" \
+            -f target_url="$WORKFLOW_URL" \
+            -f description="Verifying generated files" \
+            -f context="Connectors Verify Codegen"
+
+      - name: Checkout target repo
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ inputs.repository }}
+          ref: ${{ steps.pr.outputs.head_sha }}
+          path: connectors
+          token: ${{ secrets.TOKEN }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: connectors/go.mod
+          cache-dependency-path: connectors/go.sum
+
+      - name: Configure git token for go mod git fallback
+        env:
+          TOKEN: ${{ secrets.TOKEN }}
+        run: |
+          git config --global url."https://x-access-token:${TOKEN}@github.com/".insteadOf "https://github.com/"
+
+      - name: Verify manifests and generated code
+        working-directory: connectors
+        run: |
+          set -euo pipefail
+          make manifests generate
+          if ! git diff --exit-code -- config/ pkg/apis/; then
+            echo "::error::Generated files are out of date. Run 'make manifests generate' locally and commit the results."
+            exit 1
+          fi
+
+      - name: Update commit status (final)
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.TOKEN }}
+        run: |
+          set -euo pipefail
+          WORKFLOW_URL="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          if [ "${{ job.status }}" = "success" ]; then
+            STATE="success"
+            DESC="Generated files are up-to-date"
+          else
+            STATE="failure"
+            DESC="Generated files are out of date"
+          fi
+          gh api "repos/${{ inputs.repository }}/statuses/${{ steps.pr.outputs.head_sha }}" \
+            --method POST \
+            -f state="$STATE" \
+            -f target_url="$WORKFLOW_URL" \
+            -f description="$DESC" \
+            -f context="Connectors Verify Codegen"
+
   integration-test:
     name: Integration Test
     runs-on: ubuntu-latest
