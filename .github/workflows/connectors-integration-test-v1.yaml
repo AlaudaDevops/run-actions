@@ -9,9 +9,21 @@ name: Connectors Integration Test v1
 # branches until an explicit deprecation window closes. Bug fixes within
 # v1 edit this file in place and every caller picks them up.
 #
+# Two modes, selected by which of pr_number / branch the caller provides:
+#
+# PR mode — caller passes `pr_number`. Head SHA is resolved via `gh pr view`
+# unless the caller pinned it. Commit status is written to that SHA under
+# the context "Connectors Integration Test".
+#
+# Branch mode — caller passes `branch` (and should pin `head_sha` from
+# `github.sha` at dispatch time, to avoid racing against subsequent pushes
+# on the same branch). Used for pushes to `main` / `release-*`.
+#
+# Exactly one of pr_number / branch must be set.
+#
 # Caller (connectors repo, on pull_request):
 #
-#   - name: Trigger integration test
+#   - name: Trigger integration test (PR mode)
 #     env: { GH_TOKEN: ${{ secrets.RUN_ACTIONS_TOKEN }} }
 #     run: |
 #       gh workflow run connectors-integration-test-v1.yaml \
@@ -19,6 +31,17 @@ name: Connectors Integration Test v1
 #         --field repository="${{ github.repository }}" \
 #         --field pr_number="${{ github.event.pull_request.number }}" \
 #         --field head_sha="${{ github.event.pull_request.head.sha }}"
+#
+# Caller (connectors repo, on push to main / release-*):
+#
+#   - name: Trigger integration test (branch mode)
+#     env: { GH_TOKEN: ${{ secrets.RUN_ACTIONS_TOKEN }} }
+#     run: |
+#       gh workflow run connectors-integration-test-v1.yaml \
+#         --repo AlaudaDevops/run-actions \
+#         --field repository="${{ github.repository }}" \
+#         --field branch="${{ github.ref_name }}" \
+#         --field head_sha="${{ github.sha }}"
 
 on:
   workflow_dispatch:
@@ -28,12 +51,21 @@ on:
         description: "Target repository (owner/repo)"
         required: true
         type: string
+
+      # --- exactly one of pr_number / branch ---
       pr_number:
-        description: "Pull request number"
-        required: true
+        description: "Pull request number (PR mode). Leave empty for branch mode."
+        required: false
         type: string
+        default: ""
+      branch:
+        description: "Branch name (branch mode, e.g. `main` or `release-1.10`). Leave empty for PR mode."
+        required: false
+        type: string
+        default: ""
+
       head_sha:
-        description: "PR head SHA to stamp commit status on (optional; resolved via gh pr view if empty)"
+        description: "Commit SHA to check out and stamp status on. PR mode: optional (resolved via `gh pr view`). Branch mode: strongly recommended — the caller should pin `github.sha` to avoid racing against subsequent pushes; if empty, the callee resolves the branch tip once."
         required: false
         type: string
         default: ""
@@ -87,7 +119,8 @@ on:
   workflow_call:
     inputs:
       repository:         { required: true,  type: string }
-      pr_number:          { required: true,  type: string }
+      pr_number:          { required: false, type: string, default: "" }
+      branch:             { required: false, type: string, default: "" }
       head_sha:           { required: false, type: string, default: "" }
       bdd_tags_extra_exclude: { required: false, type: string, default: "~@csi-approval-deny-error-file && ~@accesspolicy-controller-filter-project" }
       godog_concurrency:  { required: false, type: string, default: "1" }
@@ -123,7 +156,7 @@ jobs:
           # `go mod`'s git fallback on unrelated public github.com repos.
           persist-credentials: false
 
-      - name: Resolve PR head ref and SHA
+      - name: Resolve target ref and SHA
         id: pr
         env:
           GH_TOKEN: ${{ secrets.TOKEN }}
@@ -131,28 +164,64 @@ jobs:
           set -euo pipefail
           REPO="${{ inputs.repository }}"
           PR="${{ inputs.pr_number }}"
+          BRANCH="${{ inputs.branch }}"
           INPUT_SHA="${{ inputs.head_sha }}"
 
-          META=$(gh pr view "$PR" --repo "$REPO" --json headRefName,headRefOid,baseRefName,state)
-          HEAD_REF=$(echo "$META" | jq -r '.headRefName')
-          HEAD_SHA=$(echo "$META" | jq -r '.headRefOid')
-          BASE_REF=$(echo "$META" | jq -r '.baseRefName')
-          STATE=$(echo "$META" | jq -r '.state')
-
-          # Caller-pinned SHA wins over live lookup (handles force-push).
-          if [ -n "$INPUT_SHA" ]; then
-            HEAD_SHA="$INPUT_SHA"
+          if [ -n "$PR" ] && [ -n "$BRANCH" ]; then
+            echo "::error::pass exactly one of pr_number / branch, not both"
+            exit 1
+          fi
+          if [ -z "$PR" ] && [ -z "$BRANCH" ]; then
+            echo "::error::one of pr_number / branch must be set"
+            exit 1
           fi
 
+          if [ -n "$PR" ]; then
+            # PR mode — resolve via gh pr view.
+            MODE="pr"
+            META=$(gh pr view "$PR" --repo "$REPO" --json headRefName,headRefOid,baseRefName,state)
+            HEAD_REF=$(echo "$META" | jq -r '.headRefName')
+            HEAD_SHA=$(echo "$META" | jq -r '.headRefOid')
+            BASE_REF=$(echo "$META" | jq -r '.baseRefName')
+            STATE=$(echo "$META" | jq -r '.state')
+
+            # Caller-pinned SHA wins over live lookup (handles force-push).
+            if [ -n "$INPUT_SHA" ]; then
+              HEAD_SHA="$INPUT_SHA"
+            fi
+            DISPLAY="PR $REPO#$PR — head=$HEAD_REF@$HEAD_SHA base=$BASE_REF state=$STATE"
+          else
+            # Branch mode — caller-pinned SHA wins; otherwise resolve the
+            # branch tip once. Callers on `push` SHOULD pin github.sha to
+            # avoid racing against subsequent pushes — if a newer commit
+            # lands before this resolve step runs, an unpinned lookup
+            # would stamp the wrong SHA with this run's result.
+            MODE="branch"
+            HEAD_REF="$BRANCH"
+            BASE_REF="$BRANCH"
+            STATE="BRANCH"
+            if [ -n "$INPUT_SHA" ]; then
+              HEAD_SHA="$INPUT_SHA"
+            else
+              HEAD_SHA=$(gh api "repos/$REPO/branches/$BRANCH" --jq '.commit.sha')
+              echo "::warning::head_sha not pinned by caller — resolved branch tip at job start ($HEAD_SHA). Pin github.sha in the caller to avoid races."
+            fi
+            DISPLAY="branch $REPO@$BRANCH — head=$HEAD_SHA"
+          fi
+
+          echo "mode=$MODE"         >> "$GITHUB_OUTPUT"
           echo "head_ref=$HEAD_REF" >> "$GITHUB_OUTPUT"
           echo "head_sha=$HEAD_SHA" >> "$GITHUB_OUTPUT"
           echo "base_ref=$BASE_REF" >> "$GITHUB_OUTPUT"
           echo "state=$STATE"       >> "$GITHUB_OUTPUT"
 
-          echo "Resolved PR $REPO#$PR — head=$HEAD_REF@$HEAD_SHA base=$BASE_REF state=$STATE"
+          echo "Resolved $DISPLAY"
 
       - name: Set commit status (pending)
-        if: steps.pr.outputs.state == 'OPEN'
+        # Skip only if the PR was closed/merged between dispatch and job
+        # start — a closed PR's head SHA may have been deleted. Branch
+        # mode and open PRs always get a status.
+        if: steps.pr.outputs.mode == 'branch' || steps.pr.outputs.state == 'OPEN'
         env:
           GH_TOKEN: ${{ secrets.TOKEN }}
         run: |
@@ -381,8 +450,10 @@ jobs:
       - name: Write job summary
         if: always()
         env:
-          PR_REPO: ${{ inputs.repository }}
+          MODE: ${{ steps.pr.outputs.mode }}
+          TARGET_REPO: ${{ inputs.repository }}
           PR_NUMBER: ${{ inputs.pr_number }}
+          BRANCH: ${{ inputs.branch }}
           HEAD_SHA: ${{ steps.pr.outputs.head_sha }}
           HEAD_REF: ${{ steps.pr.outputs.head_ref }}
           BASE_REF: ${{ steps.pr.outputs.base_ref }}
@@ -400,12 +471,18 @@ jobs:
           SUMMARY="$GITHUB_STEP_SUMMARY"
           ALLURE_DIR=connectors/testing/allure-results
 
-          # Header + config block.
+          # Header + config block. Target line depends on mode.
+          if [ "$MODE" = "branch" ]; then
+            TARGET_LINE="**Branch:** [\`${BRANCH}\`](https://github.com/${TARGET_REPO}/tree/${BRANCH}) (${TARGET_REPO})"
+          else
+            TARGET_LINE="**PR:** [${TARGET_REPO}#${PR_NUMBER}](https://github.com/${TARGET_REPO}/pull/${PR_NUMBER}) — \`${HEAD_REF}\` → \`${BASE_REF}\`"
+          fi
+
           cat >> "$SUMMARY" <<EOF
           # Connectors Integration Test
 
-          **PR:** [${PR_REPO}#${PR_NUMBER}](https://github.com/${PR_REPO}/pull/${PR_NUMBER}) — \`${HEAD_REF}\` → \`${BASE_REF}\`
-          **Head:** [\`${HEAD_SHA:0:8}\`](https://github.com/${PR_REPO}/commit/${HEAD_SHA})
+          ${TARGET_LINE}
+          **Head:** [\`${HEAD_SHA:0:8}\`](https://github.com/${TARGET_REPO}/commit/${HEAD_SHA})
           **Workflow run:** [${GITHUB_RUN_ID}](${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID})
 
           ## Phases
@@ -564,7 +641,7 @@ jobs:
           if-no-files-found: ignore
 
       - name: Update commit status (final)
-        if: always() && steps.pr.outputs.state == 'OPEN'
+        if: always() && (steps.pr.outputs.mode == 'branch' || steps.pr.outputs.state == 'OPEN')
         env:
           GH_TOKEN: ${{ secrets.TOKEN }}
         run: |
