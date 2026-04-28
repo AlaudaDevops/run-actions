@@ -1,0 +1,488 @@
+name: DevOps Demo Validate v1
+
+# Heavy CI workflow for AlaudaDevops/devops-demo. Runs the baseline
+# gates (test, lint, i18n, agent-guide-drift, openspec, build matrix)
+# plus the schema-golden and dry-run smoke gates introduced by
+# openspec/changes/move-ci-to-run-actions/. Reports a single commit
+# status `DevOps Demo CI` on the target SHA.
+#
+# Versioning is by filename: this is v1. Breaking changes go in a new
+# `devops-demo-validate-v2.yaml`; v1 is kept until callers migrate.
+# Bug fixes within v1 edit this file in place.
+#
+# Caller (devops-demo repo, on pull_request and push to main):
+#
+#   - name: Trigger DevOps Demo CI
+#     env: { GH_TOKEN: ${{ secrets.TOKEN }} }
+#     run: |
+#       gh workflow run devops-demo-validate-v1.yaml \
+#         --repo AlaudaDevops/run-actions \
+#         --field repository="${{ github.repository }}" \
+#         --field head_sha="<sha>" \
+#         --field {pr_number,branch}="<value>"
+#
+# Required secrets:
+#   - TOKEN — PAT with `workflow` scope on AlaudaDevops/run-actions and
+#     `repo:status` write on the target repo. Used to read PR metadata
+#     and to stamp the commit status.
+#   - ECOMMERCE_APP_DEPLOY_KEY — read-only deploy key on the
+#     ecommerce-app submodule. When empty, the workflow falls back to
+#     the placeholder stub so it can run before the secret is
+#     provisioned (see task 6.4 in the change).
+
+on:
+  workflow_dispatch:
+    inputs:
+      repository:
+        description: "Target repository (owner/repo)"
+        required: true
+        type: string
+      pr_number:
+        description: "PR number to validate (PR mode). Leave empty for branch mode."
+        required: false
+        type: string
+        default: ""
+      branch:
+        description: "Branch to validate (branch mode, e.g. main). Leave empty for PR mode."
+        required: false
+        type: string
+        default: ""
+      head_sha:
+        description: "Head SHA to stamp commit status on. Resolved from pr_number or branch when empty."
+        required: false
+        type: string
+        default: ""
+      golangci_lint_version:
+        description: "golangci-lint version. Match the version pinned in the legacy ci.yml."
+        required: false
+        type: string
+        default: "v2.11.4"
+      timeout_minutes:
+        description: "Per-job timeout."
+        required: false
+        type: number
+        default: 30
+  workflow_call:
+    inputs:
+      repository:           { required: true,  type: string }
+      pr_number:            { required: false, type: string, default: "" }
+      branch:               { required: false, type: string, default: "" }
+      head_sha:             { required: false, type: string, default: "" }
+      golangci_lint_version:{ required: false, type: string, default: "v2.11.4" }
+      timeout_minutes:      { required: false, type: number, default: 30 }
+    secrets:
+      TOKEN:
+        required: true
+      ECOMMERCE_APP_DEPLOY_KEY:
+        required: false
+
+permissions:
+  contents: read
+
+env:
+  STATUS_CONTEXT: "DevOps Demo CI"
+  KUBECONFORM_VERSION: "v0.7.0"
+
+jobs:
+  # --- target resolution + pending status -------------------------------
+  resolve:
+    name: Resolve target & stamp pending
+    runs-on: ubuntu-latest
+    outputs:
+      head_sha: ${{ steps.target.outputs.head_sha }}
+      mode:     ${{ steps.target.outputs.mode }}
+    steps:
+      - name: Validate inputs and resolve head SHA
+        id: target
+        env:
+          GH_TOKEN: ${{ secrets.TOKEN }}
+          IN_REPO:   ${{ inputs.repository }}
+          IN_PR:     ${{ inputs.pr_number }}
+          IN_BRANCH: ${{ inputs.branch }}
+          IN_SHA:    ${{ inputs.head_sha }}
+        run: |
+          set -euo pipefail
+          if [ -z "$IN_REPO" ]; then
+            echo "::error::repository input is required"
+            exit 1
+          fi
+          if [ -n "$IN_PR" ] && [ -n "$IN_BRANCH" ]; then
+            echo "::error::supply exactly one of pr_number / branch"
+            exit 1
+          fi
+          if [ -z "$IN_PR" ] && [ -z "$IN_BRANCH" ] && [ -z "$IN_SHA" ]; then
+            echo "::error::one of pr_number / branch / head_sha must be set"
+            exit 1
+          fi
+
+          MODE=""
+          SHA="$IN_SHA"
+          if [ -n "$IN_PR" ]; then
+            MODE=pr
+            if [ -z "$SHA" ]; then
+              SHA=$(gh pr view "$IN_PR" --repo "$IN_REPO" --json headRefOid --jq .headRefOid)
+            fi
+          elif [ -n "$IN_BRANCH" ]; then
+            MODE=branch
+            if [ -z "$SHA" ]; then
+              SHA=$(gh api "repos/$IN_REPO/branches/$IN_BRANCH" --jq '.commit.sha')
+            fi
+          else
+            MODE=sha
+          fi
+
+          if [ -z "$SHA" ]; then
+            echo "::error::failed to resolve head SHA"
+            exit 1
+          fi
+
+          echo "mode=$MODE"     >> "$GITHUB_OUTPUT"
+          echo "head_sha=$SHA"  >> "$GITHUB_OUTPUT"
+          echo "Resolved mode=$MODE sha=$SHA on $IN_REPO"
+
+      - name: Stamp commit status (pending)
+        env:
+          GH_TOKEN: ${{ secrets.TOKEN }}
+        run: |
+          set -euo pipefail
+          WORKFLOW_URL="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          gh api "repos/${{ inputs.repository }}/statuses/${{ steps.target.outputs.head_sha }}" \
+            --method POST \
+            -f state="pending" \
+            -f target_url="$WORKFLOW_URL" \
+            -f description="DevOps Demo gates running" \
+            -f context="$STATUS_CONTEXT"
+
+  # --- gate jobs --------------------------------------------------------
+  test:
+    name: test
+    needs: resolve
+    runs-on: ubuntu-latest
+    timeout-minutes: ${{ fromJSON(inputs.timeout_minutes) }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ inputs.repository }}
+          ref: ${{ needs.resolve.outputs.head_sha }}
+          submodules: recursive
+          ssh-key: ${{ secrets.ECOMMERCE_APP_DEPLOY_KEY }}
+          token: ${{ secrets.TOKEN }}
+          persist-credentials: false
+      - name: Stub ecommerce-app when submodule checkout produced no content
+        # Always runs: when ECOMMERCE_APP_DEPLOY_KEY is populated and
+        # actions/checkout fetched the submodule successfully, the
+        # directory has content and this is a no-op. When the secret is
+        # empty (ssh-key receives ""), checkout silently skips the
+        # submodule and we synthesize the placeholder so
+        # `//go:embed all:ecommerce-app` finds a non-empty dir.
+        run: |
+          if [ ! -d ecommerce-app ] || [ -z "$(ls -A ecommerce-app 2>/dev/null)" ]; then
+            echo "::warning title=submodule-fallback::ECOMMERCE_APP_DEPLOY_KEY missing — using placeholder stub"
+            mkdir -p ecommerce-app && touch ecommerce-app/.ci-stub
+          fi
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: go test
+        run: go test -race -count=1 ./...
+
+  lint:
+    name: lint
+    needs: resolve
+    runs-on: ubuntu-latest
+    timeout-minutes: ${{ fromJSON(inputs.timeout_minutes) }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ inputs.repository }}
+          ref: ${{ needs.resolve.outputs.head_sha }}
+          submodules: recursive
+          ssh-key: ${{ secrets.ECOMMERCE_APP_DEPLOY_KEY }}
+          token: ${{ secrets.TOKEN }}
+          persist-credentials: false
+      - name: Stub ecommerce-app when submodule checkout produced no content
+        # Always runs: when ECOMMERCE_APP_DEPLOY_KEY is populated and
+        # actions/checkout fetched the submodule successfully, the
+        # directory has content and this is a no-op. When the secret is
+        # empty (ssh-key receives ""), checkout silently skips the
+        # submodule and we synthesize the placeholder so
+        # `//go:embed all:ecommerce-app` finds a non-empty dir.
+        run: |
+          if [ ! -d ecommerce-app ] || [ -z "$(ls -A ecommerce-app 2>/dev/null)" ]; then
+            echo "::warning title=submodule-fallback::ECOMMERCE_APP_DEPLOY_KEY missing — using placeholder stub"
+            mkdir -p ecommerce-app && touch ecommerce-app/.ci-stub
+          fi
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - uses: golangci/golangci-lint-action@v8
+        with:
+          version: ${{ inputs.golangci_lint_version }}
+
+  i18n:
+    name: i18n
+    needs: resolve
+    runs-on: ubuntu-latest
+    timeout-minutes: ${{ fromJSON(inputs.timeout_minutes) }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ inputs.repository }}
+          ref: ${{ needs.resolve.outputs.head_sha }}
+          token: ${{ secrets.TOKEN }}
+          persist-credentials: false
+      - name: make check-i18n
+        run: make check-i18n
+
+  agent-guide-drift:
+    name: agent-guide-drift
+    needs: resolve
+    runs-on: ubuntu-latest
+    timeout-minutes: ${{ fromJSON(inputs.timeout_minutes) }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ inputs.repository }}
+          ref: ${{ needs.resolve.outputs.head_sha }}
+          submodules: recursive
+          ssh-key: ${{ secrets.ECOMMERCE_APP_DEPLOY_KEY }}
+          token: ${{ secrets.TOKEN }}
+          persist-credentials: false
+      - name: Stub ecommerce-app when submodule checkout produced no content
+        # Always runs: when ECOMMERCE_APP_DEPLOY_KEY is populated and
+        # actions/checkout fetched the submodule successfully, the
+        # directory has content and this is a no-op. When the secret is
+        # empty (ssh-key receives ""), checkout silently skips the
+        # submodule and we synthesize the placeholder so
+        # `//go:embed all:ecommerce-app` finds a non-empty dir.
+        run: |
+          if [ ! -d ecommerce-app ] || [ -z "$(ls -A ecommerce-app 2>/dev/null)" ]; then
+            echo "::warning title=submodule-fallback::ECOMMERCE_APP_DEPLOY_KEY missing — using placeholder stub"
+            mkdir -p ecommerce-app && touch ecommerce-app/.ci-stub
+          fi
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: regenerate agent-guide reference files
+        run: go run ./internal/cmd/gen-agent-refs -out docs/agents
+      - name: assert no drift
+        run: make check-agent-guide
+
+  openspec:
+    name: openspec
+    needs: resolve
+    runs-on: ubuntu-latest
+    # Advisory until tracked separately; mirrors the legacy ci.yml stance.
+    continue-on-error: true
+    timeout-minutes: ${{ fromJSON(inputs.timeout_minutes) }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ inputs.repository }}
+          ref: ${{ needs.resolve.outputs.head_sha }}
+          token: ${{ secrets.TOKEN }}
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: install openspec CLI
+        run: npm install -g @fission-ai/openspec@1.3.1
+      - name: openspec validate --all
+        run: openspec validate --all
+
+  build:
+    name: build (${{ matrix.goos }}/${{ matrix.goarch }})
+    needs: resolve
+    runs-on: ubuntu-latest
+    timeout-minutes: ${{ fromJSON(inputs.timeout_minutes) }}
+    strategy:
+      fail-fast: false
+      matrix:
+        goos: [linux, darwin]
+        goarch: [amd64, arm64]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ inputs.repository }}
+          ref: ${{ needs.resolve.outputs.head_sha }}
+          submodules: recursive
+          ssh-key: ${{ secrets.ECOMMERCE_APP_DEPLOY_KEY }}
+          token: ${{ secrets.TOKEN }}
+          persist-credentials: false
+      - name: Stub ecommerce-app when submodule checkout produced no content
+        # Always runs: when ECOMMERCE_APP_DEPLOY_KEY is populated and
+        # actions/checkout fetched the submodule successfully, the
+        # directory has content and this is a no-op. When the secret is
+        # empty (ssh-key receives ""), checkout silently skips the
+        # submodule and we synthesize the placeholder so
+        # `//go:embed all:ecommerce-app` finds a non-empty dir.
+        run: |
+          if [ ! -d ecommerce-app ] || [ -z "$(ls -A ecommerce-app 2>/dev/null)" ]; then
+            echo "::warning title=submodule-fallback::ECOMMERCE_APP_DEPLOY_KEY missing — using placeholder stub"
+            mkdir -p ecommerce-app && touch ecommerce-app/.ci-stub
+          fi
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: go build ${{ matrix.goos }}/${{ matrix.goarch }}
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: '0'
+        run: |
+          mkdir -p dist
+          VERSION=$(git describe --tags --always --dirty 2>/dev/null || echo "ci")
+          COMMIT=$(git rev-parse --short HEAD)
+          DATE=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+          go build \
+            -ldflags "-X main.version=${VERSION} -X main.commit=${COMMIT} -X main.date=${DATE}" \
+            -o dist/devops-demo-${GOOS}-${GOARCH} \
+            ./cmd/devops-demo
+
+  smoke-dry-run:
+    name: smoke-dry-run
+    needs: resolve
+    runs-on: ubuntu-latest
+    timeout-minutes: ${{ fromJSON(inputs.timeout_minutes) }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ inputs.repository }}
+          ref: ${{ needs.resolve.outputs.head_sha }}
+          submodules: recursive
+          ssh-key: ${{ secrets.ECOMMERCE_APP_DEPLOY_KEY }}
+          token: ${{ secrets.TOKEN }}
+          persist-credentials: false
+      - name: Stub ecommerce-app when submodule checkout produced no content
+        # Always runs: when ECOMMERCE_APP_DEPLOY_KEY is populated and
+        # actions/checkout fetched the submodule successfully, the
+        # directory has content and this is a no-op. When the secret is
+        # empty (ssh-key receives ""), checkout silently skips the
+        # submodule and we synthesize the placeholder so
+        # `//go:embed all:ecommerce-app` finds a non-empty dir.
+        run: |
+          if [ ! -d ecommerce-app ] || [ -z "$(ls -A ecommerce-app 2>/dev/null)" ]; then
+            echo "::warning title=submodule-fallback::ECOMMERCE_APP_DEPLOY_KEY missing — using placeholder stub"
+            mkdir -p ecommerce-app && touch ecommerce-app/.ci-stub
+          fi
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: install kubeconform
+        run: |
+          set -euo pipefail
+          curl -sSL "https://github.com/yannh/kubeconform/releases/download/${KUBECONFORM_VERSION}/kubeconform-linux-amd64.tar.gz" \
+            | tar xz -C /tmp
+          sudo install -m 0755 /tmp/kubeconform /usr/local/bin/kubeconform
+          kubeconform -v
+      - name: make build
+        run: make build
+      - name: make smoke-dry-run
+        run: make smoke-dry-run
+
+  schema-golden:
+    name: schema-golden
+    needs: resolve
+    runs-on: ubuntu-latest
+    timeout-minutes: ${{ fromJSON(inputs.timeout_minutes) }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ inputs.repository }}
+          ref: ${{ needs.resolve.outputs.head_sha }}
+          submodules: recursive
+          ssh-key: ${{ secrets.ECOMMERCE_APP_DEPLOY_KEY }}
+          token: ${{ secrets.TOKEN }}
+          persist-credentials: false
+      - name: Stub ecommerce-app when submodule checkout produced no content
+        # Always runs: when ECOMMERCE_APP_DEPLOY_KEY is populated and
+        # actions/checkout fetched the submodule successfully, the
+        # directory has content and this is a no-op. When the secret is
+        # empty (ssh-key receives ""), checkout silently skips the
+        # submodule and we synthesize the placeholder so
+        # `//go:embed all:ecommerce-app` finds a non-empty dir.
+        run: |
+          if [ ! -d ecommerce-app ] || [ -z "$(ls -A ecommerce-app 2>/dev/null)" ]; then
+            echo "::warning title=submodule-fallback::ECOMMERCE_APP_DEPLOY_KEY missing — using placeholder stub"
+            mkdir -p ecommerce-app && touch ecommerce-app/.ci-stub
+          fi
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: make build
+        run: make build
+      - name: make schema-golden
+        run: make schema-golden
+
+  # --- finalize: aggregate gate results, stamp final status -------------
+  finalize:
+    name: Finalize commit status
+    if: always()
+    needs:
+      - resolve
+      - test
+      - lint
+      - i18n
+      - agent-guide-drift
+      - openspec
+      - build
+      - smoke-dry-run
+      - schema-golden
+    runs-on: ubuntu-latest
+    steps:
+      - name: Compute aggregate state
+        id: agg
+        env:
+          # `openspec` is intentionally excluded from the aggregate
+          # because it runs with continue-on-error and is advisory.
+          R_RESOLVE:           ${{ needs.resolve.result }}
+          R_TEST:              ${{ needs.test.result }}
+          R_LINT:              ${{ needs.lint.result }}
+          R_I18N:              ${{ needs.i18n.result }}
+          R_AGENT_GUIDE:       ${{ needs['agent-guide-drift'].result }}
+          R_BUILD:             ${{ needs.build.result }}
+          R_SMOKE:             ${{ needs['smoke-dry-run'].result }}
+          R_SCHEMA:            ${{ needs['schema-golden'].result }}
+        run: |
+          set -euo pipefail
+          STATE=success
+          DESC="DevOps Demo gates passed"
+          for r in "$R_RESOLVE" "$R_TEST" "$R_LINT" "$R_I18N" "$R_AGENT_GUIDE" "$R_BUILD" "$R_SMOKE" "$R_SCHEMA"; do
+            case "$r" in
+              success) ;;
+              cancelled)
+                STATE=error
+                DESC="DevOps Demo gates cancelled"
+                ;;
+              skipped)
+                # Skipped means an earlier failed need blocked the gate.
+                STATE=failure
+                DESC="DevOps Demo gates skipped due to earlier failure"
+                ;;
+              *)
+                STATE=failure
+                DESC="One or more DevOps Demo gates failed"
+                ;;
+            esac
+          done
+          echo "state=$STATE" >> "$GITHUB_OUTPUT"
+          echo "description=$DESC" >> "$GITHUB_OUTPUT"
+          echo "Aggregate: $STATE — $DESC"
+      - name: Stamp commit status (final)
+        env:
+          GH_TOKEN: ${{ secrets.TOKEN }}
+        run: |
+          set -euo pipefail
+          WORKFLOW_URL="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          gh api "repos/${{ inputs.repository }}/statuses/${{ needs.resolve.outputs.head_sha }}" \
+            --method POST \
+            -f state="${{ steps.agg.outputs.state }}" \
+            -f target_url="$WORKFLOW_URL" \
+            -f description="${{ steps.agg.outputs.description }}" \
+            -f context="$STATUS_CONTEXT"

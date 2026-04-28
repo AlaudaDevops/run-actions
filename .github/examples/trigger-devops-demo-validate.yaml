@@ -1,0 +1,118 @@
+# Example: thin caller in a consumer repo that delegates CI to
+# `devops-demo-validate-v1.yaml` in AlaudaDevops/run-actions.
+#
+# Drop this file into the consumer repo at
+# `.github/workflows/validate.yaml`, configure the secrets listed
+# below, and remove any inline CI workflow that the v1 callee now
+# subsumes.
+#
+# Required secrets in the consumer repo:
+#   - TOKEN — PAT with `workflow` scope on AlaudaDevops/run-actions
+#     and `repo:status` write here.
+#
+# Required secrets in AlaudaDevops/run-actions (one-time setup):
+#   - ECOMMERCE_APP_DEPLOY_KEY — read-only deploy key on the
+#     ecommerce-app submodule, only required if the consumer repo
+#     uses `//go:embed all:ecommerce-app`. When empty, the callee
+#     falls back to a placeholder stub.
+
+name: Validate
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: "PR number to validate (PR mode). Leave empty for branch mode."
+        required: false
+        type: string
+        default: ""
+      branch:
+        description: "Branch to validate (branch mode). Leave empty for PR mode."
+        required: false
+        type: string
+        default: ""
+
+# Per-SHA concurrency: duplicate dispatches for the same head SHA
+# dedupe; intermediate commits on a branch each get their own run.
+concurrency:
+  group: validate-${{ github.event.pull_request.head.sha || github.event.after || github.sha }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  dispatch:
+    runs-on: ubuntu-latest
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft != true
+    steps:
+      - name: Resolve mode + head SHA
+        id: target
+        env:
+          GH_TOKEN: ${{ secrets.TOKEN }}
+        run: |
+          set -euo pipefail
+          MODE=""; PR=""; BRANCH=""; SHA=""
+          case "${{ github.event_name }}" in
+            pull_request)
+              MODE=pr
+              PR="${{ github.event.pull_request.number }}"
+              SHA="${{ github.event.pull_request.head.sha }}"
+              ;;
+            push)
+              MODE=branch
+              BRANCH="${{ github.ref_name }}"
+              SHA="${{ github.sha }}"
+              ;;
+            workflow_dispatch)
+              IN_PR="${{ inputs.pr_number }}"
+              IN_BR="${{ inputs.branch }}"
+              if [ -n "$IN_PR" ] && [ -n "$IN_BR" ]; then
+                echo "::error::supply exactly one of pr_number / branch"
+                exit 1
+              fi
+              if [ -z "$IN_PR" ] && [ -z "$IN_BR" ]; then
+                echo "::error::one of pr_number / branch must be set"
+                exit 1
+              fi
+              if [ -n "$IN_PR" ]; then
+                MODE=pr
+                PR="$IN_PR"
+                SHA=$(gh pr view "$PR" --repo "${{ github.repository }}" --json headRefOid --jq .headRefOid)
+              else
+                MODE=branch
+                BRANCH="$IN_BR"
+                SHA=$(gh api "repos/${{ github.repository }}/branches/$BRANCH" --jq '.commit.sha')
+              fi
+              ;;
+          esac
+          echo "mode=$MODE"      >> "$GITHUB_OUTPUT"
+          echo "pr_number=$PR"   >> "$GITHUB_OUTPUT"
+          echo "branch=$BRANCH"  >> "$GITHUB_OUTPUT"
+          echo "head_sha=$SHA"   >> "$GITHUB_OUTPUT"
+
+      - name: Trigger devops-demo-validate-v1 in run-actions
+        env:
+          GH_TOKEN: ${{ secrets.TOKEN }}
+        run: |
+          set -euo pipefail
+          MODE="${{ steps.target.outputs.mode }}"
+          ARGS=(
+            --repo AlaudaDevops/run-actions
+            --field repository="${{ github.repository }}"
+            --field head_sha="${{ steps.target.outputs.head_sha }}"
+          )
+          if [ "$MODE" = "pr" ]; then
+            ARGS+=(--field pr_number="${{ steps.target.outputs.pr_number }}")
+            DESC="PR #${{ steps.target.outputs.pr_number }}"
+          else
+            ARGS+=(--field branch="${{ steps.target.outputs.branch }}")
+            DESC="branch ${{ steps.target.outputs.branch }}"
+          fi
+          gh workflow run devops-demo-validate-v1.yaml "${ARGS[@]}"
+          echo "Dispatched devops-demo-validate-v1 for $DESC (${{ steps.target.outputs.head_sha }})"
