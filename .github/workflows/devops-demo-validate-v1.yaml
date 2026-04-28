@@ -64,12 +64,29 @@ on:
         default: 30
   workflow_call:
     inputs:
-      repository:           { required: true,  type: string }
-      pr_number:            { required: false, type: string, default: "" }
-      branch:               { required: false, type: string, default: "" }
-      head_sha:             { required: false, type: string, default: "" }
-      golangci_lint_version:{ required: false, type: string, default: "v2.11.4" }
-      timeout_minutes:      { required: false, type: number, default: 30 }
+      repository:
+        required: true
+        type: string
+      pr_number:
+        required: false
+        type: string
+        default: ""
+      branch:
+        required: false
+        type: string
+        default: ""
+      head_sha:
+        required: false
+        type: string
+        default: ""
+      golangci_lint_version:
+        required: false
+        type: string
+        default: "v2.11.4"
+      timeout_minutes:
+        required: false
+        type: number
+        default: 30
     secrets:
       TOKEN:
         required: true
