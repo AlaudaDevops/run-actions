@@ -6,15 +6,12 @@
 # below, and remove any inline CI workflow that the v1 callee now
 # subsumes.
 #
-# Required secrets in the consumer repo:
-#   - TOKEN — PAT with `workflow` scope on AlaudaDevops/run-actions
-#     and `repo:status` write here.
-#
-# Required secrets in AlaudaDevops/run-actions (one-time setup):
-#   - ECOMMERCE_APP_DEPLOY_KEY — read-only deploy key on the
-#     ecommerce-app submodule, only required if the consumer repo
-#     uses `//go:embed all:ecommerce-app`. When empty, the callee
-#     falls back to a placeholder stub.
+# Required secret in the consumer repo:
+#   - TOKEN — PAT with `workflow` scope on AlaudaDevops/run-actions,
+#     `repo:status` write here, and `repo` read on any private
+#     submodules the consumer repo embeds (e.g. `ecommerce-app`).
+#     actions/checkout@v4 forwards this token for submodule clones,
+#     so no separate deploy key is needed.
 
 name: Validate
 
