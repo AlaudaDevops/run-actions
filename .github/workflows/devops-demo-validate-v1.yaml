@@ -22,13 +22,11 @@ name: DevOps Demo Validate v1
 #         --field {pr_number,branch}="<value>"
 #
 # Required secrets:
-#   - TOKEN — PAT with `workflow` scope on AlaudaDevops/run-actions and
-#     `repo:status` write on the target repo. Used to read PR metadata
-#     and to stamp the commit status.
-#   - ECOMMERCE_APP_DEPLOY_KEY — read-only deploy key on the
-#     ecommerce-app submodule. When empty, the workflow falls back to
-#     the placeholder stub so it can run before the secret is
-#     provisioned (see task 6.4 in the change).
+#   - TOKEN — PAT with `workflow` scope on AlaudaDevops/run-actions,
+#     `repo:status` write on the target repo, and `repo` read on any
+#     private submodules (ecommerce-app). actions/checkout@v4 transparently
+#     rewrites SSH submodule URLs to HTTPS and uses the same token, so
+#     no separate deploy key is needed.
 
 on:
   workflow_dispatch:
@@ -90,8 +88,6 @@ on:
     secrets:
       TOKEN:
         required: true
-      ECOMMERCE_APP_DEPLOY_KEY:
-        required: false
 
 permissions:
   contents: read
@@ -182,21 +178,8 @@ jobs:
           repository: ${{ inputs.repository }}
           ref: ${{ needs.resolve.outputs.head_sha }}
           submodules: recursive
-          ssh-key: ${{ secrets.ECOMMERCE_APP_DEPLOY_KEY }}
           token: ${{ secrets.TOKEN }}
           persist-credentials: false
-      - name: Stub ecommerce-app when submodule checkout produced no content
-        # Always runs: when ECOMMERCE_APP_DEPLOY_KEY is populated and
-        # actions/checkout fetched the submodule successfully, the
-        # directory has content and this is a no-op. When the secret is
-        # empty (ssh-key receives ""), checkout silently skips the
-        # submodule and we synthesize the placeholder so
-        # `//go:embed all:ecommerce-app` finds a non-empty dir.
-        run: |
-          if [ ! -d ecommerce-app ] || [ -z "$(ls -A ecommerce-app 2>/dev/null)" ]; then
-            echo "::warning title=submodule-fallback::ECOMMERCE_APP_DEPLOY_KEY missing — using placeholder stub"
-            mkdir -p ecommerce-app && touch ecommerce-app/.ci-stub
-          fi
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
@@ -215,21 +198,8 @@ jobs:
           repository: ${{ inputs.repository }}
           ref: ${{ needs.resolve.outputs.head_sha }}
           submodules: recursive
-          ssh-key: ${{ secrets.ECOMMERCE_APP_DEPLOY_KEY }}
           token: ${{ secrets.TOKEN }}
           persist-credentials: false
-      - name: Stub ecommerce-app when submodule checkout produced no content
-        # Always runs: when ECOMMERCE_APP_DEPLOY_KEY is populated and
-        # actions/checkout fetched the submodule successfully, the
-        # directory has content and this is a no-op. When the secret is
-        # empty (ssh-key receives ""), checkout silently skips the
-        # submodule and we synthesize the placeholder so
-        # `//go:embed all:ecommerce-app` finds a non-empty dir.
-        run: |
-          if [ ! -d ecommerce-app ] || [ -z "$(ls -A ecommerce-app 2>/dev/null)" ]; then
-            echo "::warning title=submodule-fallback::ECOMMERCE_APP_DEPLOY_KEY missing — using placeholder stub"
-            mkdir -p ecommerce-app && touch ecommerce-app/.ci-stub
-          fi
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
@@ -264,21 +234,8 @@ jobs:
           repository: ${{ inputs.repository }}
           ref: ${{ needs.resolve.outputs.head_sha }}
           submodules: recursive
-          ssh-key: ${{ secrets.ECOMMERCE_APP_DEPLOY_KEY }}
           token: ${{ secrets.TOKEN }}
           persist-credentials: false
-      - name: Stub ecommerce-app when submodule checkout produced no content
-        # Always runs: when ECOMMERCE_APP_DEPLOY_KEY is populated and
-        # actions/checkout fetched the submodule successfully, the
-        # directory has content and this is a no-op. When the secret is
-        # empty (ssh-key receives ""), checkout silently skips the
-        # submodule and we synthesize the placeholder so
-        # `//go:embed all:ecommerce-app` finds a non-empty dir.
-        run: |
-          if [ ! -d ecommerce-app ] || [ -z "$(ls -A ecommerce-app 2>/dev/null)" ]; then
-            echo "::warning title=submodule-fallback::ECOMMERCE_APP_DEPLOY_KEY missing — using placeholder stub"
-            mkdir -p ecommerce-app && touch ecommerce-app/.ci-stub
-          fi
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
@@ -326,21 +283,8 @@ jobs:
           repository: ${{ inputs.repository }}
           ref: ${{ needs.resolve.outputs.head_sha }}
           submodules: recursive
-          ssh-key: ${{ secrets.ECOMMERCE_APP_DEPLOY_KEY }}
           token: ${{ secrets.TOKEN }}
           persist-credentials: false
-      - name: Stub ecommerce-app when submodule checkout produced no content
-        # Always runs: when ECOMMERCE_APP_DEPLOY_KEY is populated and
-        # actions/checkout fetched the submodule successfully, the
-        # directory has content and this is a no-op. When the secret is
-        # empty (ssh-key receives ""), checkout silently skips the
-        # submodule and we synthesize the placeholder so
-        # `//go:embed all:ecommerce-app` finds a non-empty dir.
-        run: |
-          if [ ! -d ecommerce-app ] || [ -z "$(ls -A ecommerce-app 2>/dev/null)" ]; then
-            echo "::warning title=submodule-fallback::ECOMMERCE_APP_DEPLOY_KEY missing — using placeholder stub"
-            mkdir -p ecommerce-app && touch ecommerce-app/.ci-stub
-          fi
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
@@ -371,21 +315,8 @@ jobs:
           repository: ${{ inputs.repository }}
           ref: ${{ needs.resolve.outputs.head_sha }}
           submodules: recursive
-          ssh-key: ${{ secrets.ECOMMERCE_APP_DEPLOY_KEY }}
           token: ${{ secrets.TOKEN }}
           persist-credentials: false
-      - name: Stub ecommerce-app when submodule checkout produced no content
-        # Always runs: when ECOMMERCE_APP_DEPLOY_KEY is populated and
-        # actions/checkout fetched the submodule successfully, the
-        # directory has content and this is a no-op. When the secret is
-        # empty (ssh-key receives ""), checkout silently skips the
-        # submodule and we synthesize the placeholder so
-        # `//go:embed all:ecommerce-app` finds a non-empty dir.
-        run: |
-          if [ ! -d ecommerce-app ] || [ -z "$(ls -A ecommerce-app 2>/dev/null)" ]; then
-            echo "::warning title=submodule-fallback::ECOMMERCE_APP_DEPLOY_KEY missing — using placeholder stub"
-            mkdir -p ecommerce-app && touch ecommerce-app/.ci-stub
-          fi
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
@@ -413,21 +344,8 @@ jobs:
           repository: ${{ inputs.repository }}
           ref: ${{ needs.resolve.outputs.head_sha }}
           submodules: recursive
-          ssh-key: ${{ secrets.ECOMMERCE_APP_DEPLOY_KEY }}
           token: ${{ secrets.TOKEN }}
           persist-credentials: false
-      - name: Stub ecommerce-app when submodule checkout produced no content
-        # Always runs: when ECOMMERCE_APP_DEPLOY_KEY is populated and
-        # actions/checkout fetched the submodule successfully, the
-        # directory has content and this is a no-op. When the secret is
-        # empty (ssh-key receives ""), checkout silently skips the
-        # submodule and we synthesize the placeholder so
-        # `//go:embed all:ecommerce-app` finds a non-empty dir.
-        run: |
-          if [ ! -d ecommerce-app ] || [ -z "$(ls -A ecommerce-app 2>/dev/null)" ]; then
-            echo "::warning title=submodule-fallback::ECOMMERCE_APP_DEPLOY_KEY missing — using placeholder stub"
-            mkdir -p ecommerce-app && touch ecommerce-app/.ci-stub
-          fi
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
