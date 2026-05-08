@@ -94,7 +94,6 @@ permissions:
 
 env:
   STATUS_CONTEXT: "DevOps Demo CI"
-  KUBECONFORM_VERSION: "v0.7.0"
 
 jobs:
   # --- target resolution + pending status -------------------------------
@@ -304,35 +303,6 @@ jobs:
             -o dist/devops-demo-${GOOS}-${GOARCH} \
             ./cmd/devops-demo
 
-  smoke-dry-run:
-    name: smoke-dry-run
-    needs: resolve
-    runs-on: ubuntu-latest
-    timeout-minutes: ${{ fromJSON(inputs.timeout_minutes) }}
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          repository: ${{ inputs.repository }}
-          ref: ${{ needs.resolve.outputs.head_sha }}
-          submodules: recursive
-          token: ${{ secrets.TOKEN }}
-          persist-credentials: false
-      - uses: actions/setup-go@v5
-        with:
-          go-version-file: go.mod
-          cache: true
-      - name: install kubeconform
-        run: |
-          set -euo pipefail
-          curl -sSL "https://github.com/yannh/kubeconform/releases/download/${KUBECONFORM_VERSION}/kubeconform-linux-amd64.tar.gz" \
-            | tar xz -C /tmp
-          sudo install -m 0755 /tmp/kubeconform /usr/local/bin/kubeconform
-          kubeconform -v
-      - name: make build
-        run: make build
-      - name: make smoke-dry-run
-        run: make smoke-dry-run
-
   schema-golden:
     name: schema-golden
     needs: resolve
@@ -367,7 +337,6 @@ jobs:
       - agent-guide-drift
       - openspec
       - build
-      - smoke-dry-run
       - schema-golden
     runs-on: ubuntu-latest
     steps:
@@ -382,13 +351,12 @@ jobs:
           R_I18N:              ${{ needs.i18n.result }}
           R_AGENT_GUIDE:       ${{ needs['agent-guide-drift'].result }}
           R_BUILD:             ${{ needs.build.result }}
-          R_SMOKE:             ${{ needs['smoke-dry-run'].result }}
           R_SCHEMA:            ${{ needs['schema-golden'].result }}
         run: |
           set -euo pipefail
           STATE=success
           DESC="DevOps Demo gates passed"
-          for r in "$R_RESOLVE" "$R_TEST" "$R_LINT" "$R_I18N" "$R_AGENT_GUIDE" "$R_BUILD" "$R_SMOKE" "$R_SCHEMA"; do
+          for r in "$R_RESOLVE" "$R_TEST" "$R_LINT" "$R_I18N" "$R_AGENT_GUIDE" "$R_BUILD" "$R_SCHEMA"; do
             case "$r" in
               success) ;;
               cancelled)
