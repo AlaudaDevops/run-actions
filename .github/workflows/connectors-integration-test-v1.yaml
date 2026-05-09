@@ -461,19 +461,28 @@ jobs:
       - name: Show cluster info
         run: kubectl cluster-info && kubectl get nodes -o wide
 
-      - name: Pre-load public nginx as the BDD testdata expected path
+      - name: Pre-load public images as the BDD testdata expected paths
         working-directory: connectors
         run: |
           set -euo pipefail
-          # The BDD testdata references nginx via a Go template that
-          # expands to `<default-registry>/3rdparty/nginx:1.23.2` when
-          # no override is provided. Pull the public Docker Hub image,
-          # retag under the default path, and load into the kind node so
-          # pods with `imagePullPolicy: IfNotPresent` find it locally.
-          NGINX_PATH='152-231-registry.alauda.cn:60070/3rdparty/nginx:1.23.2'
-          docker pull nginx:1.23.2
-          docker tag nginx:1.23.2 "$NGINX_PATH"
-          kind load docker-image "$NGINX_PATH" --name "$CLUSTER_NAME"
+          # The BDD testdata references images via a Go template that
+          # expands to `<default-registry>/3rdparty/<image>` when no
+          # override is provided. Pull public Docker Hub images, retag
+          # under the default path, and load into the kind node so pods
+          # with `imagePullPolicy: IfNotPresent` find them locally.
+          DEFAULT_REG='152-231-registry.alauda.cn:60070/3rdparty'
+
+          for spec in \
+            "nginx:1.23.2 nginx:1.23.2" \
+            "node:22.18-alpine3.22 node:22.18-alpine3.22" \
+          ; do
+            public="${spec%% *}"
+            target="${DEFAULT_REG}/${spec##* }"
+            echo "pulling $public -> retag as $target"
+            docker pull "$public"
+            docker tag  "$public" "$target"
+            kind load docker-image "$target" --name "$CLUSTER_NAME"
+          done
 
       - name: Install cert-manager from upstream
         env:
