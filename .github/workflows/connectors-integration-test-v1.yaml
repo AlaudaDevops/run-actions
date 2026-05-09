@@ -472,15 +472,11 @@ jobs:
           # with `imagePullPolicy: IfNotPresent` find them locally.
           DEFAULT_REG='152-231-registry.alauda.cn:60070/3rdparty'
 
-          for spec in \
-            "nginx:1.23.2 nginx:1.23.2" \
-            "node:22.18-alpine3.22 node:22.18-alpine3.22" \
-          ; do
-            public="${spec%% *}"
-            target="${DEFAULT_REG}/${spec##* }"
-            echo "pulling $public -> retag as $target"
-            docker pull "$public"
-            docker tag  "$public" "$target"
+          for img in nginx:1.23.2 node:22.18-alpine3.22; do
+            target="${DEFAULT_REG}/${img}"
+            echo "pulling $img -> retag as $target"
+            docker pull "$img"
+            docker tag  "$img" "$target"
             kind load docker-image "$target" --name "$CLUSTER_NAME"
           done
 
