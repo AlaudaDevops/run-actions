@@ -56,9 +56,10 @@ jobs:
     steps:
     - name: Check if this is a reverse sync commit
       id: check_reverse_sync
+      env:
+        COMMIT_MSG: ${{ github.event.head_commit.message }}
       run: |
-        commit_msg="${{ github.event.head_commit.message }}"
-        if echo "$commit_msg" | grep -q "\[reverse-sync\]"; then
+        if echo "$COMMIT_MSG" | grep -qF "[reverse-sync]"; then
           echo "reverse_sync=true" >> $GITHUB_OUTPUT
           echo "🔄 This commit is from reverse sync - skipping forward sync to prevent loop"
         else
