@@ -1,9 +1,9 @@
 name: Scheduled date update in repo
 on:
-  schedule:
-    # all input default values should be added into the workflow directly
-    # https://stackoverflow.com/questions/72539900/schedule-trigger-github-action-workflow-with-input-parameters
-    - cron: "0 4 * * MON"
+  # schedule:
+  #   # all input default values should be added into the workflow directly
+  #   # https://stackoverflow.com/questions/72539900/schedule-trigger-github-action-workflow-with-input-parameters
+  #   - cron: "0 4 * * MON"
 
   workflow_dispatch: {}
 

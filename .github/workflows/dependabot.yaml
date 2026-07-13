@@ -1,9 +1,9 @@
 name: dependabot
 on:
-  schedule:
-    # all input default values should be added into the workflow directly
-    # https://stackoverflow.com/questions/72539900/schedule-trigger-github-action-workflow-with-input-parameters
-    - cron: '0 7 * * 1'
+  # schedule:
+  #   # all input default values should be added into the workflow directly
+  #   # https://stackoverflow.com/questions/72539900/schedule-trigger-github-action-workflow-with-input-parameters
+  #   - cron: '0 7 * * 1'
   workflow_dispatch:
     inputs:
       repo:
