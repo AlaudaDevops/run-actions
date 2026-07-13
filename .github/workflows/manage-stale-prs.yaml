@@ -1,9 +1,9 @@
 name: Manage Stale Pull Requests
 
 on:
-  schedule:
-    # Run Mondays at 2 AM UTC
-    - cron: '0 2 * * 1'
+  # schedule:
+  #   # Run Mondays at 2 AM UTC
+  #   - cron: '0 2 * * 1'
   workflow_dispatch:
     inputs:
       organization:
@@ -109,4 +109,3 @@ jobs:
             "${{ needs.validate-inputs.outputs.delete_days }}" \
             "${{ env.PROTECTED_BRANCHES }}" \
             "${{ env.DRY_RUN }}"
-
